@@ -16,15 +16,22 @@ import { supabase } from '@/supabase';
 
 function usePersistent<T>(key: string, fallback: T) {
   const [value, setValue] = useState<T>(() => {
-    const saved = localStorage.getItem(key);
-    return saved ? JSON.parse(saved) as T : fallback;
+    try {
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : fallback;
+    } catch {
+      return fallback;
+    }
   });
-  const update = (next: T | ((current: T) => T)) =>
+
+  const update = (next: T | ((current: T) => T)) => {
     setValue((current) => {
-      const resolved = typeof next === 'function' ? (next as (current: T) => T)(current) : next;
+      const resolved = typeof next === 'function' ? (next as (prev: T) => T)(current) : next;
       localStorage.setItem(key, JSON.stringify(resolved));
       return resolved;
     });
+  };
+
   return [value, update] as const;
 }
 
@@ -52,7 +59,7 @@ function AppInner() {
 
       const { data, error } = await supabase
         .from('collections')
-        .select('id, agentId, category, amount, receipt, notes, collected_at, created_at')
+        .select('id, agent_id, category, amount, receipt_number, notes, collected_at, created_at')
         .order('collected_at', { ascending: false });
 
       if (error || cancelled) {
@@ -62,43 +69,30 @@ function AppInner() {
 
       setCollections((data ?? []).map((item) => ({
         id: item.id,
-        agentId: item.agentId,
+        agentId: item.agent_id,
         category: item.category,
         amount: Number(item.amount),
-        receipt: item.receipt ?? '',
+        receipt: item.receipt_number ?? '',
         notes: item.notes ?? '',
         date: item.collected_at ? String(item.collected_at).slice(0, 10) : String(item.created_at).slice(0, 10),
       })));
     };
 
-    const loadRecommendations = async () => {
-      if (!supabase) return;
-      const { data, error } = await supabase
-        .from('agent_recommendation_history')
-        .select('id, agent_id, message, created_at')
-        .order('created_at', { ascending: false });
-      if (error || cancelled) return;
-      setRecommendations((data ?? []).map((item) => ({ id: item.id, agentId: item.agent_id, message: item.message, createdAt: item.created_at })));
+    loadCollections();
+
+    return () => {
+      cancelled = true;
     };
-
-    void loadCollections();
-    void loadRecommendations();
-
-    return () => { cancelled = true; };
   }, []);
 
-  const saveRecommendation = async (recommendation: Recommendation) => {
-    if (!supabase) throw new Error('Recommendations are unavailable');
-    const { data, error } = await supabase
-      .from('agent_recommendation_history')
-      .insert({ agent_id: recommendation.agentId, message: recommendation.message })
-      .select('id, created_at')
-      .single();
-    if (error) throw error;
-    setRecommendations((current) => [{ ...recommendation, id: data.id, createdAt: data.created_at }, ...current]);
+  const handleSaveRecommendation = async (recommendation: Recommendation) => {
+    setRecommendations((prev) => [recommendation, ...prev]);
   };
 
-  if (!session) return <Login onLogin={setSession} agents={agents} adminPassword={adminPassword} />;
+  if (!session) {
+    return <Login onLogin={setSession} agents={agents} adminPassword={adminPassword} />;
+  }
+
   return (
     <Shell
       session={session}
@@ -107,7 +101,7 @@ function AppInner() {
       setAgents={setAgents}
       setCollections={setCollections}
       recommendations={recommendations}
-      onSaveRecommendation={saveRecommendation}
+      onSaveRecommendation={handleSaveRecommendation}
       adminPassword={adminPassword}
       setAdminPassword={setAdminPassword}
       onLogout={() => setSession(null)}
