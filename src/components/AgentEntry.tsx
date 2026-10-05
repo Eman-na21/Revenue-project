@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react';
 import { Check, ChevronDown, FileText, Hash, MessageSquare, Plus, Receipt } from 'lucide-react';
 import { Agent, Category, Collection, categories, categoryStyles, etb, isoToday } from '@/types';
 import { useLang } from '@/i18n';
+import { supabase } from '@/supabase';
 
 type Props = {
   agent: Agent;
@@ -33,26 +34,76 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
     return Object.keys(e).length === 0;
   };
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (!validate()) return;
-    setCollections(current => [...current, {
-      id: `c-${Date.now()}`,
-      agentId: agent.id,
+const submit = async (event: FormEvent) => {
+  event.preventDefault();
+  if (!validate()) return;
+
+  if (!supabase) {
+    setErrors({ submit: 'Database connection is not configured.' });
+    return;
+  }
+
+  // 1. የ Aisha ን UUID ከ profiles ሰንጠረዥ በትክክል መፈለግ
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('id')
+    .eq('username', agent.username)
+    .maybeSingle();
+
+  // ፕሮፋይሉ ከተገኘ UUID ውን ይጠቀማል፣ ካልተገኘ ኤረር እንዳያሳይ ያደርጋል
+  if (profileError || !profile) {
+    console.error('Profile fetch error:', profileError);
+    setErrors({ 
+      submit: `በ Supabase 'profiles' ሰንጠረዥ ውስጥ የ '${agent.username}' ፕሮፋይል አልተገኘም።` 
+    });
+    return;
+  }
+
+  // 2. በ Supabase የተገኘውን ትክክለኛ UUID በመጠቀም መረጃውን ማስገባት
+  const { data, error } = await supabase
+    .from('collections')
+    .insert({
+      agent_id: profile.id, // በትክክል የ Supabase UUID ይጠቀማል
       category,
       amount: parsedAmount,
-      receipt: receipt.trim(),
+      receipt_number: receipt.trim(),
       notes: notes.trim(),
-      date: isoToday,
-    }]);
-    setLastAmount(etb(parsedAmount));
-    setAmount('');
-    setReceipt('');
-    setNotes('');
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 4000);
-  };
+      collected_at: isoToday,
+    })
+    .select()
+    .single();
 
+  if (error) {
+    console.error('Collection insert error:', error);
+    setErrors({ submit: error.message });
+    return;
+  }
+
+  // 3. Local State ን ማዘመን
+  setCollections(current => [
+    ...current,
+    {
+      id: data.id,
+      agentId: agent.id,
+      category: data.category,
+      amount: Number(data.amount),
+      receipt: data.receipt_number ?? '',
+      notes: data.notes ?? '',
+      date: data.collected_at
+        ? String(data.collected_at).slice(0, 10)
+        : isoToday,
+    },
+  ]);
+
+  setLastAmount(etb(parsedAmount));
+  setAmount('');
+  setReceipt('');
+  setNotes('');
+  setErrors({});
+  setSuccess(true);
+
+  setTimeout(() => setSuccess(false), 4000);
+};
   return (
     <div className="space-y-6">
       <div className="animate-slide-up">
@@ -138,7 +189,11 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
             {errors.receipt && <p className="mt-1.5 text-xs text-[#c0392b]">{errors.receipt}</p>}
           </label>
         </div>
-
+{errors.submit && (
+  <p className="mt-3 text-sm text-[#c0392b]">
+    {errors.submit}
+  </p>
+)}
         <label className="mt-5 block">
           <span className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-[#334e68]">
             <MessageSquare size={14} className="text-[#829ab1]" /> {t('notes')} <span className="font-normal text-[#829ab1]">({t('optional')})</span>

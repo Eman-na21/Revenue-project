@@ -3,7 +3,7 @@ import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer,
 import { BarChart3, Bell, CalendarDays, Check, ClipboardList, Download, FileText, Globe, Home, KeyRound, Lock, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, Trash2, UserRound, Users, X } from 'lucide-react';
 import {
   Agent, Category, Collection, Recommendation, Session, Tab, categories, categoryStyles, compact, etb,
-  formatDayLabel, isoToday, currentDateLabel, currentMonth, currentYear, fiscalYearLabel, seedAgents, seedCollections,
+  formatDayLabel, isoToday, currentDateLabel, currentMonth, currentYear, fiscalYearLabel, seedAgents,
 } from '@/types';
 import { LangProvider, useLang } from '@/i18n';
 import { AgentSettings } from '@/components/AgentSettings';
@@ -40,12 +40,37 @@ function AppInner() {
   const { t, lang, setLang } = useLang();
   const [session, setSession] = useState<Session | null>(null);
   const [agents, setAgents] = usePersistent<Agent[]>('revenue-agents-v3', seedAgents);
-  const [collections, setCollections] = usePersistent<Collection[]>('revenue-collections-v4', seedCollections);
+  const [collections, setCollections] = useState<Collection[]>([]);
   const [adminPassword, setAdminPassword] = usePersistent<string>('revenue-admin-pw', 'admin123');
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
 
   useEffect(() => {
     let cancelled = false;
+
+    const loadCollections = async () => {
+      if (!supabase) return;
+
+      const { data, error } = await supabase
+        .from('collections')
+        .select('id, agentId, category, amount, receipt, notes, collected_at, created_at')
+        .order('collected_at', { ascending: false });
+
+      if (error || cancelled) {
+        if (error) console.error('Collections load error:', error);
+        return;
+      }
+
+      setCollections((data ?? []).map((item) => ({
+        id: item.id,
+        agentId: item.agentId,
+        category: item.category,
+        amount: Number(item.amount),
+        receipt: item.receipt ?? '',
+        notes: item.notes ?? '',
+        date: item.collected_at ? String(item.collected_at).slice(0, 10) : String(item.created_at).slice(0, 10),
+      })));
+    };
+
     const loadRecommendations = async () => {
       if (!supabase) return;
       const { data, error } = await supabase
@@ -55,7 +80,10 @@ function AppInner() {
       if (error || cancelled) return;
       setRecommendations((data ?? []).map((item) => ({ id: item.id, agentId: item.agent_id, message: item.message, createdAt: item.created_at })));
     };
+
+    void loadCollections();
     void loadRecommendations();
+
     return () => { cancelled = true; };
   }, []);
 
