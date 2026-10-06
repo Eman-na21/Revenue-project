@@ -75,7 +75,7 @@ function AppInner() {
       // so Overview, Reports, History and Agent Management all use the same id.
       const { data: profiles, error: profilesError } = await supabase
         .from('profiles')
-        .select('id, username');
+        .select('id, username, daily_target');
 
       if (profilesError) {
         console.error('Profiles load error:', profilesError);
@@ -90,6 +90,21 @@ function AppInner() {
         );
 
         if (localAgent) {
+          const dailyTarget = Number(profile.daily_target);
+
+          // The database value is the source of truth for the agent target.
+          // Only replace the local/default value when the DB has a real target.
+          if (profile.daily_target !== null && profile.daily_target !== undefined && Number.isFinite(dailyTarget) && dailyTarget >= 0) {
+            const nextDaily = dailyTarget;
+            if (localAgent.daily !== nextDaily) {
+              setAgents((current) => current.map((a) =>
+                a.id === localAgent.id
+                  ? { ...a, daily: nextDaily, monthly: nextDaily * 30, annual: nextDaily * 365 }
+                  : a
+              ));
+            }
+          }
+
           profileToLocalAgent.set(String(profile.id).trim(), localAgent.id);
         }
       });
@@ -707,7 +722,44 @@ function AgentManagement({ agents, setAgents, collections }: { agents: Agent[]; 
   const [draft, setDraft] = useState<Agent | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const visible = agents.filter((a) => a.name.toLowerCase().includes(search.toLowerCase()) || a.username.includes(search));
-  const save = () => { if (!draft) return; setAgents((current) => current.map((a) => (a.id === draft.id ? draft : a))); setEditing(null); setDraft(null); };
+  const save = async () => {
+    if (!draft) return;
+
+    if (!supabase) {
+      window.alert('Database connection is not configured.');
+      return;
+    }
+
+    const dailyTarget = Number(draft.daily);
+    if (!Number.isFinite(dailyTarget) || dailyTarget < 0) {
+      window.alert('Please enter a valid daily target.');
+      return;
+    }
+
+    // Save the edited target to the real Supabase profile first.
+    // The UI is updated only after the database update succeeds.
+    const { error } = await supabase
+      .from('profiles')
+      .update({ daily_target: dailyTarget })
+      .eq('username', draft.username);
+
+    if (error) {
+      console.error('Agent profile update error:', error);
+      window.alert(`Could not save agent changes: ${error.message}`);
+      return;
+    }
+
+    const savedDraft: Agent = {
+      ...draft,
+      daily: dailyTarget,
+      monthly: dailyTarget * 30,
+      annual: dailyTarget * 365,
+    };
+
+    setAgents((current) => current.map((a) => (a.id === savedDraft.id ? savedDraft : a)));
+    setEditing(null);
+    setDraft(null);
+  };
   const confirmDelete = () => {
     if (!deleting) return;
     setAgents((current) => current.filter((a) => a.id !== deleting));
