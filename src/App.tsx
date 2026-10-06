@@ -35,6 +35,19 @@ function usePersistent<T>(key: string, fallback: T) {
   return [value, update] as const;
 }
 
+
+/* ---------- Shared normalization helpers ---------- */
+
+function normalizeId(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function sameAgentId(left: unknown, right: unknown): boolean {
+  const a = normalizeId(left);
+  const b = normalizeId(right);
+  return a !== '' && b !== '' && a === b;
+}
+
 function App() {
   return (
     <LangProvider>
@@ -57,6 +70,30 @@ function AppInner() {
     const loadCollections = async () => {
       if (!supabase) return;
 
+      // Supabase collections.agent_id stores the real profile UUID.
+      // The UI agents use local ids such as a1/a2. Map UUID -> local agent id
+      // so Overview, Reports, History and Agent Management all use the same id.
+      const { data: profiles, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, username');
+
+      if (profilesError) {
+        console.error('Profiles load error:', profilesError);
+      }
+
+      const profileToLocalAgent = new Map<string, string>();
+
+      (profiles ?? []).forEach((profile) => {
+        const username = String(profile.username ?? '').trim().toLowerCase();
+        const localAgent = agents.find(
+          (a) => a.username.trim().toLowerCase() === username
+        );
+
+        if (localAgent) {
+          profileToLocalAgent.set(String(profile.id).trim(), localAgent.id);
+        }
+      });
+
       const { data, error } = await supabase
         .from('collections')
         .select('id, agent_id, category, amount, receipt_number, notes, collected_at, created_at')
@@ -67,15 +104,22 @@ function AppInner() {
         return;
       }
 
-      setCollections((data ?? []).map((item) => ({
-        id: item.id,
-        agentId: item.agent_id,
-        category: item.category,
-        amount: Number(item.amount),
-        receipt: item.receipt_number ?? '',
-        notes: item.notes ?? '',
-        date: item.collected_at ? String(item.collected_at).slice(0, 10) : String(item.created_at).slice(0, 10),
-      })));
+      setCollections((data ?? []).map((item) => {
+        const rawDate = item.collected_at ?? item.created_at ?? '';
+        const cleanDate = String(rawDate).trim().split('T')[0];
+        const supabaseAgentId = normalizeId(item.agent_id);
+
+        return {
+          id: item.id,
+          // Convert the Supabase UUID back to the local agent id used by the UI.
+          agentId: profileToLocalAgent.get(supabaseAgentId) ?? supabaseAgentId,
+          category: item.category as Category,
+          amount: Number(item.amount) || 0,
+          receipt: item.receipt_number ?? '',
+          notes: item.notes ?? '',
+          date: cleanDate,
+        };
+      }));
     };
 
     loadCollections();
@@ -83,7 +127,7 @@ function AppInner() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agents]);
 
   const handleSaveRecommendation = async (recommendation: Recommendation) => {
     setRecommendations((prev) => [recommendation, ...prev]);
@@ -312,7 +356,7 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
   const seenKey = `revenue-notifications-seen-${isAdmin ? 'admin' : agentId ?? ''}`;
   const seenCount = parseInt(localStorage.getItem(seenKey) ?? '0', 10);
 
-  const relevant = (isAdmin ? collections : collections.filter((c) => c.agentId === agentId)).slice().reverse();
+  const relevant = (isAdmin ? collections : collections.filter((c) => sameAgentId(c.agentId, agentId))).slice().reverse();
   const recent = relevant.slice(0, 8);
   const unseen = Math.max(0, relevant.length - seenCount);
 
@@ -339,7 +383,7 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
               {recent.length === 0 ? (
                 <div className="py-10 text-center text-sm text-[#829ab1]">{t('noNotifications')}</div>
               ) : recent.map((item, index) => {
-                const agent = agents.find((a) => a.id === item.agentId);
+                const agent = agents.find((a) => sameAgentId(a.id, item.agentId));
                 const style = categoryStyles[item.category];
                 const isNew = index < unseen;
                 return (
@@ -384,7 +428,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
   const nav = isAdmin ? adminNav : agentNav;
   const go = (next: Tab) => { setTab(next); setMobileOpen(false); };
 
-  const currentAgent = agents.find((a) => a.id === session.agentId) ?? agents[0];
+  const currentAgent = agents.find((a) => sameAgentId(a.id, session.agentId)) ?? agents[0];
 
   return (
     <div className="min-h-screen bg-[#f4f7fb] text-[#102a43]">
@@ -465,7 +509,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
               <Reports agents={agents} collections={collections} />
             )
           ) : tab === 'entry' ? (
-            <AgentHome agent={currentAgent} collections={collections} recommendations={recommendations.filter((item) => item.agentId === currentAgent.id)} onNavigate={go} />
+            <AgentHome agent={currentAgent} collections={collections} recommendations={recommendations.filter((item) => sameAgentId(item.agentId, currentAgent.id))} onNavigate={go} />
           ) : tab === 'collect' ? (
             <AgentEntry agent={currentAgent} collections={collections} setCollections={setCollections} onDone={() => go('history')} />
           ) : tab === 'settings' ? (
@@ -544,7 +588,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
   const chartData = agents.slice(0, 6).map((agent) => ({
     name: agent.name.split(' ')[0],
     target: agent.daily,
-    actual: collections.filter((item) => item.agentId === agent.id && item.date === isoToday).reduce((sum, item) => sum + item.amount, 0),
+    actual: collections.filter((item) => sameAgentId(item.agentId, agent.id) && item.date === isoToday).reduce((sum, item) => sum + item.amount, 0),
   }));
 
   return (
@@ -634,7 +678,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
             <tbody>
               {collections.length === 0 && (<tr><td colSpan={4} className="py-12 text-center text-sm text-[#829ab1]">{t('noCollectionsYet')}</td></tr>)}
               {collections.slice().reverse().slice(0, 5).map((item) => {
-                const agent = agents.find((a) => a.id === item.agentId);
+                const agent = agents.find((a) => sameAgentId(a.id, item.agentId));
                 const style = categoryStyles[item.category];
                 return (
                   <tr key={item.id} className="border-b border-[#f0f4f8] last:border-0">
@@ -698,7 +742,7 @@ function AgentManagement({ agents, setAgents, collections }: { agents: Agent[]; 
             </thead>
             <tbody>
               {visible.map((agent) => {
-                const actual = collections.filter((c) => c.agentId === agent.id && c.date === isoToday).reduce((s, c) => s + c.amount, 0);
+                const actual = collections.filter((c) => sameAgentId(c.agentId, agent.id) && c.date === isoToday).reduce((s, c) => s + c.amount, 0);
                 const percent = agent.daily > 0 ? Math.min(100, Math.round((actual / agent.daily) * 100)) : 0;
                 return (
                   <tr key={agent.id} className="border-t border-[#e9eff5]">
@@ -873,103 +917,250 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /* ---------- Reports ---------- */
 
-type ReportDuration = 'daily' | 'monthly';
+/**
+ * Exports all collection records in the selected date range as an
+ * Excel-compatible .xls workbook. This intentionally uses browser APIs
+ * only, so no extra npm package is required.
+ */
+function downloadAllAgentsExcel(
+  agents: Agent[],
+  collections: Collection[],
+  rangeStart: string,
+  rangeEnd: string,
+) {
+  const cleanDate = (value: unknown) =>
+    String(value ?? '').trim().split('T')[0].slice(0, 10);
 
-async function downloadAllAgentsExcel(agents: Agent[], collections: Collection[], startDate: string, endDate: string) {
-  const escapeCell = (value: string | number) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const rows = agents.map((agent) => {
-    const agentCollections = collections.filter((item) => item.agentId === agent.id && item.date >= startDate && item.date <= endDate);
-    const categoryTotals = categories.map((category) => agentCollections.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0));
-    const total = categoryTotals.reduce((sum, item) => sum + item, 0);
-    const plan = agent.monthly;
-    return { agent, categoryTotals, total, plan, percent: plan > 0 ? Math.round((total / plan) * 100) : 0 };
-  }).sort((a, b) => b.total - a.total);
-  const body = rows.map((row, index) => {
-    const categoryPlan = row.plan / categories.length;
-    const categoryCells = row.categoryTotals.flatMap((amount) => [categoryPlan, amount, categoryPlan > 0 ? `${Math.round((amount / categoryPlan) * 100)}%` : '0%']);
-    return `<tr><td class="name">${escapeCell(row.agent.name)}</td>${categoryCells.map((cell) => `<td>${typeof cell === 'number' ? cell.toLocaleString('en-US') : escapeCell(cell)}</td>`).join('')}<td>${row.plan.toLocaleString('en-US')}</td><td>${row.total.toLocaleString('en-US')}</td><td>${row.percent}%</td><td>${index + 1}</td></tr>`;
-  }).join('');
-  const logo = await fetch('/logo.jpg').then((response) => response.ok ? response.blob() : null).then((blob) => blob ? new Promise<string>((resolve) => { const reader = new FileReader(); reader.onloadend = () => resolve(String(reader.result)); reader.readAsDataURL(blob); }) : '');
-  const reportTitle = `Agent Collection Report (${startDate} to ${endDate})`;
-  const html = `<html><head><meta charset="UTF-8"><style>table{border-collapse:collapse;font-family:Arial;font-size:11pt}th,td{border:1px solid #9aa7b2;padding:7px;text-align:center}th{background:#d9e2ec;font-weight:bold}.title{font-size:14pt;font-weight:bold;background:#102a43;color:white}.name{text-align:left}.brand{text-align:left;font-size:16pt;font-weight:bold;color:#102a43;border:0;padding:4px}.meta{text-align:left;color:#627d98;border:0;padding:4px}.footer{text-align:left;color:#627d98;border:0;padding-top:22px}</style></head><body><table style="border:0"><tr><td class="brand" colspan="14">${logo ? `<img src="${logo}" width="46" height="46" style="vertical-align:middle;margin-right:10px">` : ''}Kallu Revenue Office</td></tr><tr><td class="meta" colspan="14">${escapeCell(reportTitle)}</td></tr></table><br><table><tr><th class="title" colspan="14">${escapeCell(reportTitle)}</th></tr><tr><th rowspan="2">Name of agents</th><th colspan="3">Chat</th><th colspan="3">Royalty</th><th colspan="3">Other</th><th colspan="3">Total</th><th rowspan="2">Rank</th></tr><tr><th>Plan</th><th>Performance</th><th>%</th><th>Plan</th><th>Performance</th><th>%</th><th>Plan</th><th>Performance</th><th>%</th><th>Plan</th><th>Performance</th><th>%</th></tr>${body}</table><table style="border:0;width:100%"><tr><td class="footer" colspan="14">The report is prepared by Aster Werku (Administrator).</td></tr></table></body></html>`;
-  const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8' });
+  const filtered = collections
+    .filter((row) => {
+      const date = cleanDate(row.date);
+      return date >= rangeStart && date <= rangeEnd;
+    })
+    .sort((a, b) => cleanDate(a.date).localeCompare(cleanDate(b.date)));
+
+  const rows = filtered.map((row) => {
+    const agent = agents.find((a) => sameAgentId(a.id, row.agentId));
+
+    return {
+      Date: cleanDate(row.date),
+      Agent: agent?.name ?? 'Unknown Agent',
+      Username: agent?.username ?? '',
+      Category: row.category,
+      Receipt: row.receipt,
+      Amount_ETB: Number(row.amount) || 0,
+      Notes: row.notes ?? '',
+    };
+  });
+
+  const total = rows.reduce((sum, row) => sum + row.Amount_ETB, 0);
+
+  const escapeCell = (value: unknown) =>
+    String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  const header = ['Date', 'Agent', 'Username', 'Category', 'Receipt', 'Amount (ETB)', 'Notes'];
+
+  const bodyRows = rows.map((row) => `
+    <tr>
+      <td>${escapeCell(row.Date)}</td>
+      <td>${escapeCell(row.Agent)}</td>
+      <td>${escapeCell(row.Username)}</td>
+      <td>${escapeCell(row.Category)}</td>
+      <td>${escapeCell(row.Receipt)}</td>
+      <td class="number">${row.Amount_ETB}</td>
+      <td>${escapeCell(row.Notes)}</td>
+    </tr>
+  `).join('');
+
+  const html = `
+    <html>
+      <head>
+        <meta charset="UTF-8" />
+        <style>
+          table { border-collapse: collapse; font-family: Arial, sans-serif; }
+          th, td { border: 1px solid #d9e2ec; padding: 8px; }
+          th { background: #102a43; color: white; font-weight: bold; }
+          .number { text-align: right; }
+          .total { font-weight: bold; background: #e5f6ef; }
+        </style>
+      </head>
+      <body>
+        <h2>Revenue Collection Report</h2>
+        <p>Period: ${escapeCell(rangeStart)} to ${escapeCell(rangeEnd)}</p>
+        <table>
+          <thead>
+            <tr>${header.map((h) => `<th>${escapeCell(h)}</th>`).join('')}</tr>
+          </thead>
+          <tbody>
+            ${bodyRows || `
+              <tr>
+                <td colspan="7">No collection records found for this period.</td>
+              </tr>
+            `}
+            <tr class="total">
+              <td colspan="5">TOTAL</td>
+              <td class="number">${total}</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </body>
+    </html>
+  `;
+
+  const blob = new Blob(
+    [`\ufeff${html}`],
+    { type: 'application/vnd.ms-excel;charset=utf-8' },
+  );
+
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `agent-collection-report-${startDate}-to-${endDate}.xls`;
+  link.download = `revenue-report-${rangeStart}-to-${rangeEnd}.xls`;
+  document.body.appendChild(link);
   link.click();
+  link.remove();
   URL.revokeObjectURL(url);
 }
 
+/* ---------- Reports Component (Strict Date Range & Format Handling) ---------- */
+
+type ReportDuration = 'daily' | 'monthly';
+
 function Reports({ agents, collections }: { agents: Agent[]; collections: Collection[] }) {
   const { t } = useLang();
-  const [agentId, setAgentId] = useState(agents[0].id);
+  const [agentId, setAgentId] = useState(agents[0]?.id || '');
   const [mode, setMode] = useState<ReportDuration>('monthly');
   const [day, setDay] = useState(isoToday);
-  const [month, setMonth] = useState(currentMonth);
+  const [month, setMonth] = useState(currentMonth); // Format: "YYYY-MM"
   const [rangeStart, setRangeStart] = useState(`${currentMonth}-01`);
   const [rangeEnd, setRangeEnd] = useState(isoToday);
-  const agent = agents.find((a) => a.id === agentId) ?? agents[0];
-  const periodLabel = mode === 'daily' ? day : month;
-  const rows = collections.filter((item) => item.agentId === agentId && (mode === 'daily' ? item.date === day : item.date.startsWith(month)));
-  const total = rows.reduce((s, r) => s + r.amount, 0);
-  const targetValue = mode === 'daily' ? agent.daily : agent.monthly;
+
+  useEffect(() => {
+    if (agents.length === 0) {
+      setAgentId('');
+      return;
+    }
+
+    if (!agents.some((a) => sameAgentId(a.id, agentId))) {
+      setAgentId(normalizeId(agents[0].id));
+    }
+  }, [agents, agentId]);
+
+  const selectedAgentId = normalizeId(agentId);
+
+  const agent =
+    agents.find((a) => sameAgentId(a.id, selectedAgentId)) ??
+    agents[0];
+
+  const cleanDate = (rawDate: unknown): string => {
+    if (!rawDate) return '';
+
+    const str = String(rawDate).trim();
+
+    if (!str) return '';
+
+    return str.split('T')[0].slice(0, 10);
+  };
+
+  // Filter collections by Agent & Selected Date Range/Day/Month
+  const rows = collections.filter((item) => {
+    const itemAgentId = normalizeId(item.agentId);
+
+    if (!sameAgentId(itemAgentId, selectedAgentId)) {
+      return false;
+    }
+
+    const itemDay = cleanDate(item.date);
+
+    if (mode === 'daily') {
+      return itemDay === day;
+    }
+
+    return itemDay.startsWith(month);
+  });
+
+  const total = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  const targetValue = mode === 'daily' ? (agent?.daily || 0) : (agent?.monthly || 0);
   const targetLabel = mode === 'daily' ? t('dailyTargetLabel') : t('monthlyTarget');
-  const breakdown = categories.map((category) => ({ category, amount: rows.filter((r) => r.category === category).reduce((s, r) => s + r.amount, 0) }));
+  
+  const breakdown = categories.map((category) => ({
+    category,
+    amount: rows.filter((r) => r.category === category).reduce((s, r) => s + (Number(r.amount) || 0), 0),
+  }));
+
   const canExport = rangeStart <= rangeEnd;
 
   return (
     <>
       <PageTitle eyebrow={t('reporting')} title={t('monthlyReportsTitle')} description={t('reportDescription')} />
+      
       <div className="no-print mb-6 flex flex-col gap-4 rounded-2xl border border-[#d9e2ec] bg-white p-5 shadow-sm lg:flex-row lg:items-end lg:justify-between">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
           <Field label={t('exportFromDate')}><input type="date" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} className="input" /></Field>
           <Field label={t('exportToDate')}><input type="date" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} className="input" /></Field>
         </div>
-        <button onClick={() => void downloadAllAgentsExcel(agents, collections, rangeStart, rangeEnd)} disabled={!canExport} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2cb67d] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#239b67] disabled:cursor-not-allowed disabled:opacity-50"><Download size={17} /> {t('exportToExcel')}</button>
+        <button onClick={() => void downloadAllAgentsExcel(agents, collections, rangeStart, rangeEnd)} disabled={!canExport} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2cb67d] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#239b67] disabled:cursor-not-allowed disabled:opacity-50">
+          <Download size={17} /> {t('exportToExcel')}
+        </button>
       </div>
+
       <div className="grid gap-6 xl:grid-cols-[.65fr_1.35fr]">
         <div className="no-print rounded-2xl border border-[#d9e2ec] bg-white p-6 shadow-sm">
           <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-xl bg-[#eaf2fb] text-[#2d7dd2]"><FileText size={20} /></div>
           <h3 className="font-display text-xl font-bold">{t('reportSettings')}</h3>
           <p className="mt-2 text-sm leading-6 text-[#627d98]">{t('chooseAgentAndPeriod')}</p>
+          
           <div className="mt-6 space-y-5">
             <Field label={t('fieldAgent')}>
-              <select value={agentId} onChange={(e) => setAgentId(e.target.value)} className="input">
+              <select value={selectedAgentId} onChange={(e) => setAgentId(normalizeId(e.target.value))} className="input">
                 {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             </Field>
+
             <Field label={t('reportType')}>
               <div className="flex rounded-xl bg-[#f4f7fb] p-1">
                 <button onClick={() => setMode('daily')} className={`flex-1 rounded-lg py-2 text-sm font-bold transition ${mode === 'daily' ? 'bg-white text-[#102a43] shadow-sm' : 'text-[#829ab1]'}`}>{t('dailyReport')}</button>
                 <button onClick={() => setMode('monthly')} className={`flex-1 rounded-lg py-2 text-sm font-bold transition ${mode === 'monthly' ? 'bg-white text-[#102a43] shadow-sm' : 'text-[#829ab1]'}`}>{t('monthlyReportOpt')}</button>
               </div>
             </Field>
+
             {mode === 'daily' ? (
-              <Field label={t('reportingDay')}><input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="input" /></Field>
+              <Field label={t('reportingDay')}>
+                <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="input" />
+              </Field>
             ) : (
-              <Field label={t('reportingMonth')}><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="input" /></Field>
+              <Field label={t('reportingMonth')}>
+                <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="input" />
+              </Field>
             )}
+
             <button onClick={() => window.print()} className="w-full rounded-xl bg-[#102a43] py-3.5 text-sm font-bold text-white hover:bg-[#173f61]">{t('printSavePDF')}</button>
           </div>
         </div>
+
         <div className="print-area rounded-2xl border border-[#d9e2ec] bg-white p-6 shadow-sm sm:p-8 print:shadow-none">
           <div className="flex flex-col justify-between gap-5 border-b border-[#d9e2ec] pb-6 sm:flex-row">
             <div>
               <div className="text-xs font-bold uppercase tracking-[.17em] text-[#2cb67d]">{t('revenueCollectionOffice')}</div>
               <h3 className="mt-2 font-display text-2xl font-bold">{mode === 'daily' ? t('dailyCollectionReport') : t('monthlyCollectionReport')}</h3>
-              <p className="mt-1 text-sm text-[#627d98]">{agent.name} · {periodLabel}</p>
+              <p className="mt-1 text-sm text-[#627d98]">{agent?.name} · {mode === 'daily' ? day : month}</p>
             </div>
             <div className="text-left sm:text-right">
               <div className="text-xs text-[#829ab1]">{t('reportStatus')}</div>
               <div className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-[#e5f6ef] px-2.5 py-1 text-xs font-bold text-[#157a56]"><Check size={13} /> {t('ready')}</div>
             </div>
           </div>
+
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
             <div className="rounded-xl bg-[#f4f7fb] p-4"><div className="text-xs text-[#829ab1]">{targetLabel}</div><div className="mt-1 font-display font-bold">{etb(targetValue)}</div></div>
             <div className="rounded-xl bg-[#e5f6ef] p-4"><div className="text-xs text-[#157a56]">{t('totalCollected')}</div><div className="mt-1 font-display font-bold text-[#157a56]">{etb(total)}</div></div>
             <div className="rounded-xl bg-[#fff5dc] p-4"><div className="text-xs text-[#8b650b]">{t('accomplished')}</div><div className="mt-1 font-display font-bold text-[#8b650b]">{targetValue > 0 ? Math.round((total / targetValue) * 100) : 0}%</div></div>
           </div>
+
           <h4 className="mt-8 font-display font-bold">{t('categoryBreakdown')}</h4>
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-sm">
@@ -983,33 +1174,35 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
               </tbody>
             </table>
           </div>
+
           <h4 className="mt-8 font-display font-bold">{t('dailyLog')}</h4>
           <div className="mt-3 max-h-64 overflow-y-auto scrollbar">
             {rows.length === 0 ? (
               <div className="py-8 text-center text-sm text-[#829ab1]">{t('noCollectionsForPeriod')}</div>
             ) : (
-            <table className="w-full min-w-[430px] text-sm">
-              <thead className="text-xs text-[#829ab1]">
-                <tr>
-                  <th className="pb-2 text-left font-semibold">{t('date')}</th>
-                  <th className="pb-2 text-left font-semibold">{t('category')}</th>
-                  <th className="pb-2 text-left font-semibold">{t('receipt')}</th>
-                  <th className="pb-2 text-right font-semibold">{t('amount')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.id} className="border-t border-[#e9eff5]">
-                    <td className="py-2.5">{formatDayLabel(row.date)}</td>
-                    <td className="py-2.5 text-[#627d98]">{row.category}</td>
-                    <td className="py-2.5 text-[#627d98]">{row.receipt}</td>
-                    <td className="py-2.5 text-right font-semibold">{etb(row.amount)}</td>
+              <table className="w-full min-w-[430px] text-sm">
+                <thead className="text-xs text-[#829ab1]">
+                  <tr>
+                    <th className="pb-2 text-left font-semibold">{t('date')}</th>
+                    <th className="pb-2 text-left font-semibold">{t('category')}</th>
+                    <th className="pb-2 text-left font-semibold">{t('receipt')}</th>
+                    <th className="pb-2 text-right font-semibold">{t('amount')}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.id} className="border-t border-[#e9eff5]">
+                      <td className="py-2.5">{formatDayLabel(row.date)}</td>
+                      <td className="py-2.5 text-[#627d98]">{row.category}</td>
+                      <td className="py-2.5 text-[#627d98]">{row.receipt}</td>
+                      <td className="py-2.5 text-right font-semibold">{etb(row.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </div>
+
           <div className="mt-12 grid gap-10 sm:grid-cols-2">
             <div className="border-t border-[#829ab1] pt-2 text-xs text-[#627d98]">{t('fieldAgentSignature')}</div>
             <div className="border-t border-[#829ab1] pt-2 text-xs text-[#627d98]">{t('supervisorApproval')}</div>
