@@ -48,6 +48,15 @@ function sameAgentId(left: unknown, right: unknown): boolean {
   return a !== '' && b !== '' && a === b;
 }
 
+// Keep existing Supabase records compatible after the category rename.
+// Old values: Chat Royalty -> Chat, Traffic Fines -> Royalty.
+function normalizeCategory(value: unknown): Category {
+  const category = String(value ?? '').trim();
+  if (category === 'Chat Royalty' || category === 'Chat') return 'Chat';
+  if (category === 'Traffic Fines' || category === 'Royalty') return 'Royalty';
+  return 'Other Revenue';
+}
+
 function App() {
   return (
     <LangProvider>
@@ -128,7 +137,7 @@ function AppInner() {
           id: item.id,
           // Convert the Supabase UUID back to the local agent id used by the UI.
           agentId: profileToLocalAgent.get(supabaseAgentId) ?? supabaseAgentId,
-          category: item.category as Category,
+          category: normalizeCategory(item.category),
           amount: Number(item.amount) || 0,
           receipt: item.receipt_number ?? '',
           notes: item.notes ?? '',
@@ -592,8 +601,8 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
   const yearTotal = collections.filter((item) => item.date.startsWith(currentYear)).reduce((sum, item) => sum + item.amount, 0);
   const allTimeTotal = collections.reduce((sum, item) => sum + item.amount, 0);
   const catLabels: Record<string, string> = {
-    'Chat Royalty': lang === 'am' ? 'ጫት' : 'Chat',
-    'Traffic Fines': lang === 'am' ? 'ቅጣት' : 'Fines',
+    'Chat': lang === 'am' ? 'ጫት' : 'Chat',
+    'Royalty': lang === 'am' ? 'ሮያሊቲ' : 'Royalty',
     'Other Revenue': lang === 'am' ? 'ሌላ' : 'Other',
   };
   const categoryData = categories.map((category) => ({

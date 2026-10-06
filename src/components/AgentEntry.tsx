@@ -13,7 +13,7 @@ type Props = {
 
 export function AgentEntry({ agent, collections, setCollections, onDone }: Props) {
   const { t } = useLang();
-  const [category, setCategory] = useState<Category>('Chat Royalty');
+  const [category, setCategory] = useState<Category>('Chat');
   const [amount, setAmount] = useState('');
   const [receipt, setReceipt] = useState('');
   const [notes, setNotes] = useState('');

@@ -1,5 +1,5 @@
 export type Role = 'admin' | 'agent';
-export type Category = 'Chat Royalty' | 'Traffic Fines' | 'Other Revenue';
+export type Category = 'Chat' | 'Royalty' | 'Other Revenue';
 export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings';
 
 export type Agent = {
@@ -37,11 +37,19 @@ export type Session = {
   name: string;
 };
 
-export const categories: Category[] = ['Chat Royalty', 'Traffic Fines', 'Other Revenue'];
+export const categories: Category[] = ['Chat', 'Royalty', 'Other Revenue'];
+
+/** Converts legacy database category names to the current UI names. */
+export const normalizeCategory = (value: unknown): Category => {
+  const category = String(value ?? '').trim();
+  if (category === 'Chat Royalty' || category === 'Chat') return 'Chat';
+  if (category === 'Traffic Fines' || category === 'Royalty') return 'Royalty';
+  return 'Other Revenue';
+};
 
 export const categoryStyles: Record<Category, { bg: string; text: string; solid: string; light: string }> = {
-   'Chat Royalty': { bg: 'bg-[#e5f6ef]', text: 'text-[#157a56]', solid: 'bg-[#2cb67d]', light: 'bg-[#e5f6ef]' },
-  'Traffic Fines': { bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]', light: 'bg-[#eaf2fb]' },
+   'Chat': { bg: 'bg-[#e5f6ef]', text: 'text-[#157a56]', solid: 'bg-[#2cb67d]', light: 'bg-[#e5f6ef]' },
+  'Royalty': { bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]', light: 'bg-[#eaf2fb]' },
   'Other Revenue': { bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]', light: 'bg-[#fff5dc]' },
 };
 
