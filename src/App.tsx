@@ -1005,29 +1005,6 @@ function downloadAllAgentsExcel(
   const cleanDate = (value: unknown) =>
     String(value ?? '').trim().split('T')[0].slice(0, 10);
 
-  const filtered = collections
-    .filter((row) => {
-      const date = cleanDate(row.date);
-      return date >= rangeStart && date <= rangeEnd;
-    })
-    .sort((a, b) => cleanDate(a.date).localeCompare(cleanDate(b.date)));
-
-  const rows = filtered.map((row) => {
-    const agent = agents.find((a) => sameAgentId(a.id, row.agentId));
-
-    return {
-      Date: cleanDate(row.date),
-      Agent: agent?.name ?? 'Unknown Agent',
-      Username: agent?.username ?? '',
-      Category: row.category,
-      Receipt: row.receipt,
-      Amount_ETB: Number(row.amount) || 0,
-      Notes: row.notes ?? '',
-    };
-  });
-
-  const total = rows.reduce((sum, row) => sum + row.Amount_ETB, 0);
-
   const escapeCell = (value: unknown) =>
     String(value ?? '')
       .replace(/&/g, '&amp;')
@@ -1035,52 +1012,275 @@ function downloadAllAgentsExcel(
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
 
-  const header = ['Date', 'Agent', 'Username', 'Category', 'Receipt', 'Amount (ETB)', 'Notes'];
+  const money = (value: number) => Math.round(Number(value) || 0);
+  const percent = (actual: number, plan: number) =>
+    plan > 0 ? `${Math.round((actual / plan) * 100)}%` : '—';
 
-  const bodyRows = rows.map((row) => `
-    <tr>
-      <td>${escapeCell(row.Date)}</td>
-      <td>${escapeCell(row.Agent)}</td>
-      <td>${escapeCell(row.Username)}</td>
-      <td>${escapeCell(row.Category)}</td>
-      <td>${escapeCell(row.Receipt)}</td>
-      <td class="number">${row.Amount_ETB}</td>
-      <td>${escapeCell(row.Notes)}</td>
-    </tr>
-  `).join('');
+  const startDate = new Date(`${rangeStart}T00:00:00`);
+  const endDate = new Date(`${rangeEnd}T00:00:00`);
+  const dayCount =
+    Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())
+      ? 0
+      : Math.max(
+          1,
+          Math.floor((endDate.getTime() - startDate.getTime()) / 86400000) + 1,
+        );
 
+  // Only collections inside the selected From/To dates are included.
+  const filtered = collections.filter((row) => {
+    const date = cleanDate(row.date);
+    return date >= rangeStart && date <= rangeEnd;
+  });
+
+  const categoryTotal = (agent: Agent, category: Category) =>
+    filtered
+      .filter(
+        (row) =>
+          sameAgentId(row.agentId, agent.id) &&
+          normalizeCategory(row.category) === category,
+      )
+      .reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+
+  const reportRows = agents.map((agent) => {
+    const chat = categoryTotal(agent, 'Chat');
+    const royalty = categoryTotal(agent, 'Royalty');
+    const other = categoryTotal(agent, 'Other Revenue');
+    const totalActual = chat + royalty + other;
+
+    // "Plan" comes from the agent's configured DAILY TARGET.
+    // For a multi-day selected period, Total Plan is daily target × number of days.
+    const dailyPlan = money(Number(agent.daily) || 0);
+    const totalPlan = money(dailyPlan * dayCount);
+
+    return {
+      agent,
+      dailyPlan,
+      chat,
+      royalty,
+      other,
+      totalActual,
+      totalPlan,
+      totalPercent: percent(totalActual, totalPlan),
+    };
+  });
+
+  // Rank by total performance percentage, highest first.
+  const ranked = [...reportRows].sort((a, b) => {
+    const aPct = a.totalPlan > 0 ? a.totalActual / a.totalPlan : 0;
+    const bPct = b.totalPlan > 0 ? b.totalActual / b.totalPlan : 0;
+    return bPct - aPct || b.totalActual - a.totalActual;
+  });
+
+  const rankMap = new Map<string, number>();
+  ranked.forEach((row, index) =>
+    rankMap.set(normalizeId(row.agent.id), index + 1),
+  );
+
+  const bodyRows = reportRows
+    .map(
+      (row) => `
+      <tr>
+        <td class="agent">${escapeCell(row.agent.name)}</td>
+
+        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.chat)}</td>
+        <td class="number">${percent(row.chat, row.dailyPlan)}</td>
+
+        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.royalty)}</td>
+        <td class="number">${percent(row.royalty, row.dailyPlan)}</td>
+
+        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.other)}</td>
+        <td class="number">${percent(row.other, row.dailyPlan)}</td>
+
+        <td class="number">${money(row.totalPlan)}</td>
+        <td class="number">${money(row.totalActual)}</td>
+        <td class="number">${row.totalPercent}</td>
+        <td class="rank">${rankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
+      </tr>
+    `,
+    )
+    .join('');
+
+  const totalDailyPlan = reportRows.reduce(
+    (sum, row) => sum + row.dailyPlan,
+    0,
+  );
+  const totalPlan = reportRows.reduce((sum, row) => sum + row.totalPlan, 0);
+  const totalChat = reportRows.reduce((sum, row) => sum + row.chat, 0);
+  const totalRoyalty = reportRows.reduce(
+    (sum, row) => sum + row.royalty,
+    0,
+  );
+  const totalOther = reportRows.reduce((sum, row) => sum + row.other, 0);
+  const grandTotal = totalChat + totalRoyalty + totalOther;
+
+  /*
+   * The uploaded Payment Summary workbook is used ONLY as the visual
+   * reference: gray header cells, black text, thin borders, white body,
+   * centered headings and no extra dashboard colors/data.
+   */
   const html = `
     <html>
       <head>
         <meta charset="UTF-8" />
         <style>
-          table { border-collapse: collapse; font-family: Arial, sans-serif; }
-          th, td { border: 1px solid #d9e2ec; padding: 8px; }
-          th { background: #102a43; color: white; font-weight: bold; }
-          .number { text-align: right; }
-          .total { font-weight: bold; background: #e5f6ef; }
+          body {
+            font-family: Calibri, Arial, sans-serif;
+            color: #000000;
+            margin: 18px;
+          }
+
+          .title {
+            font-size: 16pt;
+            font-weight: bold;
+            text-align: center;
+            padding: 4px;
+          }
+
+          .subtitle {
+            font-size: 14pt;
+            font-weight: bold;
+            text-align: center;
+            padding: 4px;
+          }
+
+          .period {
+            font-size: 12pt;
+            text-align: center;
+            padding: 4px 4px 12px;
+          }
+
+          table {
+            border-collapse: collapse;
+            width: 100%;
+            min-width: 1250px;
+            font-family: Calibri, Arial, sans-serif;
+          }
+
+          th, td {
+            border: 1px solid #000000;
+            padding: 7px 8px;
+            white-space: nowrap;
+            font-size: 11pt;
+          }
+
+          th {
+            background: #D3D3D3;
+            color: #000000;
+            font-weight: bold;
+            text-align: center;
+            vertical-align: middle;
+          }
+
+          .group {
+            background: #D3D3D3;
+            font-weight: bold;
+            text-align: center;
+          }
+
+          .subhead {
+            background: #D3D3D3;
+            font-weight: bold;
+            text-align: center;
+          }
+
+          .agent {
+            text-align: left;
+          }
+
+          .number {
+            text-align: right;
+          }
+
+          .rank {
+            text-align: center;
+            font-weight: bold;
+          }
+
+          .total td {
+            font-weight: bold;
+            background: #FFFFFF;
+          }
+
+          .footer {
+            margin-top: 12px;
+            font-size: 11pt;
+            text-align: left;
+          }
         </style>
       </head>
+
       <body>
-        <h2>Revenue Collection Report</h2>
-        <p>Period: ${escapeCell(rangeStart)} to ${escapeCell(rangeEnd)}</p>
+        <div class="title">Revenue Collection Office</div>
+        <div class="subtitle">Agent Collection Performance Report</div>
+        <div class="period">
+          Selected Date: ${escapeCell(rangeStart)} to ${escapeCell(rangeEnd)}
+          &nbsp; | &nbsp; ${dayCount} day${dayCount === 1 ? '' : 's'}
+        </div>
+
         <table>
           <thead>
-            <tr>${header.map((h) => `<th>${escapeCell(h)}</th>`).join('')}</tr>
+            <tr>
+              <th rowspan="2">Name of Agents</th>
+              <th class="group" colspan="3">Chat</th>
+              <th class="group" colspan="3">Royalty</th>
+              <th class="group" colspan="3">Other</th>
+              <th class="group" colspan="3">Total</th>
+              <th rowspan="2">Rank</th>
+            </tr>
+            <tr>
+              <th class="subhead">Plan</th>
+              <th class="subhead">Performance</th>
+              <th class="subhead">%</th>
+
+              <th class="subhead">Plan</th>
+              <th class="subhead">Performance</th>
+              <th class="subhead">%</th>
+
+              <th class="subhead">Plan</th>
+              <th class="subhead">Performance</th>
+              <th class="subhead">%</th>
+
+              <th class="subhead">Plan</th>
+              <th class="subhead">Performance</th>
+              <th class="subhead">%</th>
+            </tr>
           </thead>
+
           <tbody>
-            ${bodyRows || `
-              <tr>
-                <td colspan="7">No collection records found for this period.</td>
-              </tr>
-            `}
+            ${
+              bodyRows ||
+              `<tr><td colspan="14">No agents found.</td></tr>`
+            }
+
             <tr class="total">
-              <td colspan="5">TOTAL</td>
-              <td class="number">${total}</td>
-              <td></td>
+              <td>TOTAL</td>
+              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalChat)}</td>
+              <td class="number">${percent(totalChat, totalDailyPlan)}</td>
+
+              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalRoyalty)}</td>
+              <td class="number">${percent(totalRoyalty, totalDailyPlan)}</td>
+
+              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalOther)}</td>
+              <td class="number">${percent(totalOther, totalDailyPlan)}</td>
+
+              <td class="number">${money(totalPlan)}</td>
+              <td class="number">${money(grandTotal)}</td>
+              <td class="number">${percent(grandTotal, totalPlan)}</td>
+              <td class="rank">—</td>
             </tr>
           </tbody>
         </table>
+
+        <div class="footer">
+          Plan = Agent Daily Target &nbsp; | &nbsp;
+          Total Plan = Agent Daily Target × Selected Days
+        </div>
       </body>
     </html>
   `;
@@ -1093,7 +1293,7 @@ function downloadAllAgentsExcel(
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `revenue-report-${rangeStart}-to-${rangeEnd}.xls`;
+  link.download = `revenue-performance-${rangeStart}-to-${rangeEnd}.xls`;
   document.body.appendChild(link);
   link.click();
   link.remove();
