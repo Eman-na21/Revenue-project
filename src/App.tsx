@@ -641,14 +641,27 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#829ab1', fontSize: 11 }} />
                 <YAxis axisLine={false} tickLine={false} tick={{ fill: '#829ab1', fontSize: 11 }} tickFormatter={compact} />
                 <Tooltip formatter={(v) => etb(Number(v))} contentStyle={{ border: '1px solid #d9e2ec', borderRadius: 12, fontSize: 12 }} />
-                <Bar dataKey="target" fill="#d9e2ec" radius={[5, 5, 0, 0]} name={t('dailyTarget')} />
-                <Bar dataKey="actual" fill="#2cb67d" radius={[5, 5, 0, 0]} name={t('totalCollected')} />
+                <Bar dataKey="target" radius={[5, 5, 0, 0]} name={t('dailyTarget')}>
+                  {chartData.map((entry) => (
+                    <Cell key={`target-${entry.name}`} fill="#2cb67d" />
+                  ))}
+                </Bar>
+                <Bar dataKey="actual" radius={[5, 5, 0, 0]} name={t('totalCollected')}>
+                  {chartData.map((entry) => {
+                    const performance = entry.target > 0
+                      ? (entry.actual / entry.target) * 100
+                      : 0;
+                    const fill = performance >= 50 ? '#e4b44c' : '#c0392b';
+                    return <Cell key={`actual-${entry.name}`} fill={fill} />;
+                  })}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
           <div className="mt-4 flex justify-center gap-5 text-xs text-[#627d98]">
-            <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#d9e2ec]" />{t('dailyTarget')}</span>
-            <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#2cb67d]" />{t('totalCollected')}</span>
+            <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#2cb67d]" />{t('dailyTarget')}</span>
+            <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#e4b44c]" />≥ 50%</span>
+            <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#c0392b]" />&lt; 50%</span>
           </div>
         </div>
         <div className="rounded-2xl border border-[#d9e2ec] bg-white p-5 sm:p-6">
