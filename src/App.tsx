@@ -1013,8 +1013,10 @@ function downloadAllAgentsExcel(
       .replace(/"/g, '&quot;');
 
   const money = (value: number) => Math.round(Number(value) || 0);
+  const percentValue = (actual: number, plan: number) =>
+    plan > 0 ? (actual / plan) * 100 : 0;
   const percent = (actual: number, plan: number) =>
-    plan > 0 ? `${Math.round((actual / plan) * 100)}%` : '—';
+    plan > 0 ? `${Math.round(percentValue(actual, plan))}%` : '—';
 
   const startDate = new Date(`${rangeStart}T00:00:00`);
   const endDate = new Date(`${rangeEnd}T00:00:00`);
@@ -1047,8 +1049,8 @@ function downloadAllAgentsExcel(
     const other = categoryTotal(agent, 'Other Revenue');
     const totalActual = chat + royalty + other;
 
-    // "Plan" comes from the agent's configured DAILY TARGET.
-    // For a multi-day selected period, Total Plan is daily target × number of days.
+    // Plan comes from the agent's configured DAILY TARGET.
+    // Total Plan = daily target × number of selected days.
     const dailyPlan = money(Number(agent.daily) || 0);
     const totalPlan = money(dailyPlan * dayCount);
 
@@ -1060,21 +1062,44 @@ function downloadAllAgentsExcel(
       other,
       totalActual,
       totalPlan,
-      totalPercent: percent(totalActual, totalPlan),
+      chatPercent: percentValue(chat, dailyPlan),
+      royaltyPercent: percentValue(royalty, dailyPlan),
+      otherPercent: percentValue(other, dailyPlan),
+      totalPercentValue: percentValue(totalActual, totalPlan),
+      chatDisplay: percent(chat, dailyPlan),
+      royaltyDisplay: percent(royalty, dailyPlan),
+      otherDisplay: percent(other, dailyPlan),
+      totalDisplay: percent(totalActual, totalPlan),
     };
   });
 
-  // Rank by total performance percentage, highest first.
-  const ranked = [...reportRows].sort((a, b) => {
-    const aPct = a.totalPlan > 0 ? a.totalActual / a.totalPlan : 0;
-    const bPct = b.totalPlan > 0 ? b.totalActual / b.totalPlan : 0;
-    return bPct - aPct || b.totalActual - a.totalActual;
-  });
+  
+  const createRankMap = (
+    percentageKey:
+      | 'chatPercent'
+      | 'royaltyPercent'
+      | 'otherPercent'
+      | 'totalPercentValue',
+    amountKey: 'chat' | 'royalty' | 'other' | 'totalActual',
+  ) => {
+    const ranked = [...reportRows].sort(
+      (a, b) =>
+        b[percentageKey] - a[percentageKey] ||
+        b[amountKey] - a[amountKey] ||
+        a.agent.name.localeCompare(b.agent.name),
+    );
 
-  const rankMap = new Map<string, number>();
-  ranked.forEach((row, index) =>
-    rankMap.set(normalizeId(row.agent.id), index + 1),
-  );
+    const rankMap = new Map<string, number>();
+    ranked.forEach((row, index) => {
+      rankMap.set(normalizeId(row.agent.id), index + 1);
+    });
+    return rankMap;
+  };
+
+  const chatRankMap = createRankMap('chatPercent', 'chat');
+  const royaltyRankMap = createRankMap('royaltyPercent', 'royalty');
+  const otherRankMap = createRankMap('otherPercent', 'other');
+  const totalRankMap = createRankMap('totalPercentValue', 'totalActual');
 
   const bodyRows = reportRows
     .map(
@@ -1084,20 +1109,23 @@ function downloadAllAgentsExcel(
 
         <td class="number">${money(row.dailyPlan)}</td>
         <td class="number">${money(row.chat)}</td>
-        <td class="number">${percent(row.chat, row.dailyPlan)}</td>
+        <td class="number">${row.chatDisplay}</td>
+        <td class="rank">${chatRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
         <td class="number">${money(row.dailyPlan)}</td>
         <td class="number">${money(row.royalty)}</td>
-        <td class="number">${percent(row.royalty, row.dailyPlan)}</td>
+        <td class="number">${row.royaltyDisplay}</td>
+        <td class="rank">${royaltyRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
         <td class="number">${money(row.dailyPlan)}</td>
         <td class="number">${money(row.other)}</td>
-        <td class="number">${percent(row.other, row.dailyPlan)}</td>
+        <td class="number">${row.otherDisplay}</td>
+        <td class="rank">${otherRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
         <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.totalActual)}</td>
-        <td class="number">${row.totalPercent}</td>
-        <td class="rank">${rankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
+        <td class="number">${row.totalDisplay}</td>
+        <td class="rank">${totalRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
       </tr>
     `,
     )
@@ -1116,11 +1144,7 @@ function downloadAllAgentsExcel(
   const totalOther = reportRows.reduce((sum, row) => sum + row.other, 0);
   const grandTotal = totalChat + totalRoyalty + totalOther;
 
-  /*
-   * The uploaded Payment Summary workbook is used ONLY as the visual
-   * reference: gray header cells, black text, thin borders, white body,
-   * centered headings and no extra dashboard colors/data.
-   */
+ 
   const html = `
     <html>
       <head>
@@ -1155,7 +1179,7 @@ function downloadAllAgentsExcel(
           table {
             border-collapse: collapse;
             width: 100%;
-            min-width: 1250px;
+            min-width: 1500px;
             font-family: Calibri, Arial, sans-serif;
           }
 
@@ -1213,7 +1237,7 @@ function downloadAllAgentsExcel(
       </head>
 
       <body>
-        <div class="title">Revenue Collection Office</div>
+        <div class="title">Kalu Revenue Collection Office</div>
         <div class="subtitle">Agent Collection Performance Report</div>
         <div class="period">
           Selected Date: ${escapeCell(rangeStart)} to ${escapeCell(rangeEnd)}
@@ -1224,50 +1248,57 @@ function downloadAllAgentsExcel(
           <thead>
             <tr>
               <th rowspan="2">Name of Agents</th>
-              <th class="group" colspan="3">Chat</th>
-              <th class="group" colspan="3">Royalty</th>
-              <th class="group" colspan="3">Other</th>
-              <th class="group" colspan="3">Total</th>
-              <th rowspan="2">Rank</th>
+              <th class="group" colspan="4">Chat</th>
+              <th class="group" colspan="4">Royalty</th>
+              <th class="group" colspan="4">Other Revenue</th>
+              <th class="group" colspan="4">Total</th>
             </tr>
             <tr>
               <th class="subhead">Plan</th>
               <th class="subhead">Performance</th>
               <th class="subhead">%</th>
+              <th class="subhead">Rank</th>
 
               <th class="subhead">Plan</th>
               <th class="subhead">Performance</th>
               <th class="subhead">%</th>
+              <th class="subhead">Rank</th>
 
               <th class="subhead">Plan</th>
               <th class="subhead">Performance</th>
               <th class="subhead">%</th>
+              <th class="subhead">Rank</th>
 
               <th class="subhead">Plan</th>
               <th class="subhead">Performance</th>
               <th class="subhead">%</th>
+              <th class="subhead">Rank</th>
             </tr>
           </thead>
 
           <tbody>
             ${
               bodyRows ||
-              `<tr><td colspan="14">No agents found.</td></tr>`
+              `<tr><td colspan="17">No agents found.</td></tr>`
             }
 
             <tr class="total">
               <td>TOTAL</td>
+
               <td class="number">${money(totalDailyPlan)}</td>
               <td class="number">${money(totalChat)}</td>
               <td class="number">${percent(totalChat, totalDailyPlan)}</td>
+              <td class="rank">—</td>
 
               <td class="number">${money(totalDailyPlan)}</td>
               <td class="number">${money(totalRoyalty)}</td>
               <td class="number">${percent(totalRoyalty, totalDailyPlan)}</td>
+              <td class="rank">—</td>
 
               <td class="number">${money(totalDailyPlan)}</td>
               <td class="number">${money(totalOther)}</td>
               <td class="number">${percent(totalOther, totalDailyPlan)}</td>
+              <td class="rank">—</td>
 
               <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(grandTotal)}</td>
@@ -1276,11 +1307,6 @@ function downloadAllAgentsExcel(
             </tr>
           </tbody>
         </table>
-
-        <div class="footer">
-          Plan = Agent Daily Target &nbsp; | &nbsp;
-          Total Plan = Agent Daily Target × Selected Days
-        </div>
       </body>
     </html>
   `;
