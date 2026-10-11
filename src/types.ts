@@ -3,10 +3,9 @@ export type Category = 'Chat' | 'Royalty' | 'Other Revenue';
 export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings';
 
 export type Agent = {
-  id: string;
+  id: string; // = Supabase profile / auth user UUID
   name: string;
   username: string;
-  password: string;
   daily: number;
   monthly: number;
   annual: number;
@@ -48,19 +47,38 @@ export const normalizeCategory = (value: unknown): Category => {
 };
 
 export const categoryStyles: Record<Category, { bg: string; text: string; solid: string; light: string }> = {
-   'Chat': { bg: 'bg-[#e5f6ef]', text: 'text-[#157a56]', solid: 'bg-[#2cb67d]', light: 'bg-[#e5f6ef]' },
+  'Chat': { bg: 'bg-[#e5f6ef]', text: 'text-[#157a56]', solid: 'bg-[#2cb67d]', light: 'bg-[#e5f6ef]' },
   'Royalty': { bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]', light: 'bg-[#eaf2fb]' },
   'Other Revenue': { bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]', light: 'bg-[#fff5dc]' },
 };
 
-export const today = new Date();
-export const isoToday = today.toISOString().slice(0, 10);
+/* ---------- Dates (always Ethiopian office time, independent of the phone's settings) ---------- */
+
+const OFFICE_TIME_ZONE = 'Africa/Addis_Ababa';
+
+/** Today's date as YYYY-MM-DD in Addis Ababa time (NOT UTC). */
+export const todayISO = (): string => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: OFFICE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+};
+
+export const isoToday = todayISO();
+export const today = new Date(`${isoToday}T12:00:00`);
 export const currentMonth = isoToday.slice(0, 7);
 export const currentYear = isoToday.slice(0, 4);
 export const currentDateLabel = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
+/** Ethiopian fiscal year starts on Hamle 1 (about 8 July) and is 7 or 8 years behind the Gregorian year. */
 export const fiscalYearLabel = (() => {
-  const ethiopianYear = today.getFullYear() - 7;
+  const [year, month, day] = isoToday.split('-').map(Number);
+  const startedThisYear = month > 7 || (month === 7 && day >= 8);
+  const ethiopianYear = year - (startedThisYear ? 7 : 8);
   return `Fiscal year ${ethiopianYear} E.C.`;
 })();
 
@@ -87,16 +105,5 @@ export const formatDayLabel = (iso: string) => {
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 };
 
-export const seedAgents: Agent[] = [
-  { id: 'a1', name: 'Kalkidan Belgu', username: 'Kalkidan', password: 'agent123', daily: 20000, monthly: 600000, annual: 7200000, active: true, avatar: 'KB' },
-  { id: 'a2', name: 'Hermon', username: 'Hermon', password: 'agent123', daily: 18000, monthly: 540000, annual: 6480000, active: true, avatar: 'H' },
-  { id: 'a3', name: 'Seid', username: 'Seid', password: 'agent123', daily: 22000, monthly: 660000, annual: 7920000, active: true, avatar: 'S' },
-  { id: 'a4', name: 'Abdu', username: 'Abdu', password: 'agent123', daily: 20000, monthly: 600000, annual: 7200000, active: true, avatar: 'A' },
-  { id: 'a5', name: 'Aisha', username: 'Aisha', password: 'agent123', daily: 16000, monthly: 480000, annual: 5760000, active: true, avatar: 'A' },
-  { id: 'a6', name: 'Netsanet', username: 'Netsanet', password: 'agent123', daily: 20000, monthly: 600000, annual: 7200000, active: true, avatar: 'N' },
-  { id: 'a7', name: 'Yimer', username: 'Yimer', password: 'agent123', daily: 18000, monthly: 540000, annual: 6480000, active: true, avatar: 'Y' },
-  { id: 'a8', name: 'Endris', username: 'Endris', password: 'agent123', daily: 20000, monthly: 600000, annual: 7200000, active: true, avatar: 'E' },
-  
-];
-
-export const seedCollections: Collection[] = [];
+export const initialsOf = (name: string) =>
+  name.split(' ').filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || '?';

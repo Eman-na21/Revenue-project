@@ -1,15 +1,16 @@
 import { FormEvent, useState } from 'react';
 import { Check, KeyRound, Lock, LogOut, Shield, UserRound } from 'lucide-react';
 import { useLang } from '@/i18n';
+import { changePassword } from '@/auth';
+import { initialsOf } from '@/types';
 
 type Props = {
-  adminPassword: string;
-  setAdminPassword: (next: string) => void;
+  name: string;
   onLogout: () => void;
 };
 
-export function AdminSettings({ adminPassword, setAdminPassword, onLogout }: Props) {
-  const { t } = useLang();
+export function AdminSettings({ name, onLogout }: Props) {
+  const { t, lang } = useLang();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -17,15 +18,11 @@ export function AdminSettings({ adminPassword, setAdminPassword, onLogout }: Pro
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccess(false);
 
-    if (currentPassword !== adminPassword) {
-      setError(t('currentPasswordIncorrect'));
-      return;
-    }
     if (newPassword.length < 6) {
       setError(t('newPasswordTooShort'));
       return;
@@ -34,21 +31,30 @@ export function AdminSettings({ adminPassword, setAdminPassword, onLogout }: Pro
       setError(t('passwordsMismatch'));
       return;
     }
-    if (newPassword === adminPassword) {
+    if (newPassword === currentPassword) {
       setError(t('sameAsCurrent'));
       return;
     }
 
     setLoading(true);
-    setTimeout(() => {
-      setAdminPassword(newPassword);
-      setLoading(false);
-      setSuccess(true);
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
-      setTimeout(() => setSuccess(false), 5000);
-    }, 400);
+    // The current password is checked by Supabase Auth, and the new one is stored there (never in the browser).
+    const result = await changePassword(currentPassword, newPassword);
+    setLoading(false);
+
+    if (result === 'wrong-current') {
+      setError(t('currentPasswordIncorrect'));
+      return;
+    }
+    if (result !== 'ok') {
+      setError(lang === 'am' ? 'የይለፍ ቃሉን መቀየር አልተቻለም። እንደገና ይሞክሩ።' : 'Could not change the password. Please try again.');
+      return;
+    }
+
+    setSuccess(true);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setTimeout(() => setSuccess(false), 5000);
   };
 
   return (
@@ -62,10 +68,10 @@ export function AdminSettings({ adminPassword, setAdminPassword, onLogout }: Pro
       <div className="rounded-2xl border border-[#d9e2ec] bg-white p-6 shadow-sm">
         <div className="flex items-center gap-4">
           <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#fff5dc] text-lg font-bold text-[#a36b05]">
-            NM
+            {initialsOf(name)}
           </div>
           <div>
-            <h3 className="font-display text-lg font-bold text-[#102a43]">Nuru Mohammed</h3>
+            <h3 className="font-display text-lg font-bold text-[#102a43]">{name}</h3>
             <p className="text-sm text-[#829ab1]">@admin</p>
           </div>
         </div>

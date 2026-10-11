@@ -2,15 +2,15 @@ import { FormEvent, useState } from 'react';
 import { Check, KeyRound, Lock, LogOut, Shield, UserRound } from 'lucide-react';
 import { Agent } from '@/types';
 import { useLang } from '@/i18n';
+import { changePassword } from '@/auth';
 
 type Props = {
   agent: Agent;
-  setAgents: (next: Agent[] | ((current: Agent[]) => Agent[])) => void;
   onLogout: () => void;
 };
 
-export function AgentSettings({ agent, setAgents, onLogout }: Props) {
-  const { t } = useLang();
+export function AgentSettings({ agent, onLogout }: Props) {
+  const { t, lang } = useLang();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -18,15 +18,11 @@ export function AgentSettings({ agent, setAgents, onLogout }: Props) {
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccess(false);
 
-    if (currentPassword !== agent.password) {
-      setError(t('currentPasswordIncorrect'));
-      return;
-    }
     if (newPassword.length < 6) {
       setError(t('newPasswordTooShort'));
       return;
@@ -35,23 +31,30 @@ export function AgentSettings({ agent, setAgents, onLogout }: Props) {
       setError(t('passwordsMismatch'));
       return;
     }
-    if (newPassword === agent.password) {
+    if (newPassword === currentPassword) {
       setError(t('sameAsCurrent'));
       return;
     }
 
     setLoading(true);
-    setTimeout(() => {
-      setAgents((current) =>
-        current.map((a) => (a.id === agent.id ? { ...a, password: newPassword } : a))
-      );
-      setLoading(false);
-      setSuccess(true);
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
-      setTimeout(() => setSuccess(false), 5000);
-    }, 400);
+    // The current password is checked by Supabase Auth, and the new one is stored there (never in the browser).
+    const result = await changePassword(currentPassword, newPassword);
+    setLoading(false);
+
+    if (result === 'wrong-current') {
+      setError(t('currentPasswordIncorrect'));
+      return;
+    }
+    if (result !== 'ok') {
+      setError(lang === 'am' ? 'የይለፍ ቃሉን መቀየር አልተቻለም። እንደገና ይሞክሩ።' : 'Could not change the password. Please try again.');
+      return;
+    }
+
+    setSuccess(true);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setTimeout(() => setSuccess(false), 5000);
   };
 
   return (

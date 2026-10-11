@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { Check, ChevronDown, FileText, Hash, MessageSquare, Plus, Receipt } from 'lucide-react';
-import { Agent, Category, Collection, categories, categoryStyles, etb, isoToday } from '@/types';
+import { Agent, Category, Collection, categories, categoryStyles, etb, isoToday, normalizeCategory } from '@/types';
 import { useLang } from '@/i18n';
 import { supabase } from '@/supabase';
 
@@ -12,7 +12,8 @@ type Props = {
 };
 
 export function AgentEntry({ agent, collections, setCollections, onDone }: Props) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
+  const [submitting, setSubmitting] = useState(false);
   const [category, setCategory] = useState<Category>('Chat');
   const [amount, setAmount] = useState('');
   const [receipt, setReceipt] = useState('');
@@ -35,75 +36,68 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
   };
 
 const submit = async (event: FormEvent) => {
-  event.preventDefault();
-  if (!validate()) return;
+    event.preventDefault();
+    if (submitting || !validate()) return;
 
-  if (!supabase) {
-    setErrors({ submit: 'Database connection is not configured.' });
-    return;
-  }
+    if (!supabase) {
+      setErrors({ submit: lang === 'am' ? 'የዳታቤዝ ግንኙነት አልተዘጋጀም።' : 'Database connection is not configured.' });
+      return;
+    }
 
-  // 1. የ Aisha ን UUID ከ profiles ሰንጠረዥ በትክክል መፈለግ
-  const { data: profile, error: profileError } = await supabase
-    .from('profiles')
-    .select('id')
-    .eq('username', agent.username)
-    .maybeSingle();
+    setSubmitting(true);
 
-  // ፕሮፋይሉ ከተገኘ UUID ውን ይጠቀማል፣ ካልተገኘ ኤረር እንዳያሳይ ያደርጋል
-  if (profileError || !profile) {
-    console.error('Profile fetch error:', profileError);
-    setErrors({ 
-      submit: `በ Supabase 'profiles' ሰንጠረዥ ውስጥ የ '${agent.username}' ፕሮፋይል አልተገኘም።` 
-    });
-    return;
-  }
+    // agent.id is the signed-in agent's own id. The database rule (RLS) accepts
+    // a new row only when agent_id matches the logged-in user, so nobody can
+    // record money on behalf of another agent.
+    const { data, error } = await supabase
+      .from('collections')
+      .insert({
+        agent_id: agent.id,
+        category,
+        amount: parsedAmount,
+        receipt_number: receipt.trim(),
+        notes: notes.trim(),
+        collected_at: isoToday,
+      })
+      .select()
+      .single();
 
-  // 2. በ Supabase የተገኘውን ትክክለኛ UUID በመጠቀም መረጃውን ማስገባት
-  const { data, error } = await supabase
-    .from('collections')
-    .insert({
-      agent_id: profile.id, // በትክክል የ Supabase UUID ይጠቀማል
-      category,
-      amount: parsedAmount,
-      receipt_number: receipt.trim(),
-      notes: notes.trim(),
-      collected_at: isoToday,
-    })
-    .select()
-    .single();
+    setSubmitting(false);
 
-  if (error) {
-    console.error('Collection insert error:', error);
-    setErrors({ submit: error.message });
-    return;
-  }
+    if (error || !data) {
+      console.error('Collection insert error:', error);
+      setErrors({ submit: error?.message ?? (lang === 'am' ? 'መረጃውን ማስቀመጥ አልተቻለም።' : 'Could not save the collection.') });
+      return;
+    }
 
-  // 3. Local State ን ማዘመን
-  setCollections(current => [
-    ...current,
-    {
-      id: data.id,
-      agentId: agent.id,
-      category: data.category,
-      amount: Number(data.amount),
-      receipt: data.receipt_number ?? '',
-      notes: data.notes ?? '',
-      date: data.collected_at
-        ? String(data.collected_at).slice(0, 10)
-        : isoToday,
-    },
-  ]);
+    // Live updates may already have added this row, so never add it twice.
+    setCollections(current =>
+      current.some(c => c.id === String(data.id))
+        ? current
+        : [
+            ...current,
+            {
+              id: String(data.id),
+              agentId: agent.id,
+              category: normalizeCategory(data.category),
+              amount: Number(data.amount),
+              receipt: data.receipt_number ?? '',
+              notes: data.notes ?? '',
+              date: data.collected_at ? String(data.collected_at).slice(0, 10) : isoToday,
+            },
+          ],
+    );
 
-  setLastAmount(etb(parsedAmount));
-  setAmount('');
-  setReceipt('');
-  setNotes('');
-  setErrors({});
-  setSuccess(true);
+    setLastAmount(etb(parsedAmount));
+    setAmount('');
+    setReceipt('');
+    setNotes('');
+    setErrors({});
+    setSuccess(true);
 
-  setTimeout(() => setSuccess(false), 4000);
-};
+    setTimeout(() => setSuccess(false), 4000);
+  };
+
   return (
     <div className="space-y-6">
       <div className="animate-slide-up">
@@ -201,7 +195,7 @@ const submit = async (event: FormEvent) => {
           <textarea rows={3} value={notes} onChange={e => setNotes(e.target.value)} placeholder={t('addRemarks')} className="input resize-none" />
         </label>
 
-        <button type="submit" className="mt-7 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2cb67d] py-4 text-sm font-bold text-white shadow-lg shadow-[#2cb67d]/20 transition hover:bg-[#239b68] active:scale-[.99]">
+        <button type="submit" disabled={submitting} className="mt-7 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2cb67d] py-4 text-sm font-bold text-white shadow-lg shadow-[#2cb67d]/20 transition hover:bg-[#239b68] active:scale-[.99] disabled:opacity-70">
           <Plus size={18} /> {t('submitCollection')}
         </button>
       </form>

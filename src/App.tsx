@@ -1,9 +1,11 @@
 import { FormEvent, useEffect, useState } from 'react';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { BarChart3, Bell, CalendarDays, Check, ClipboardList, Download, FileText, Globe, Home, KeyRound, Lock, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, Trash2, UserRound, Users, X } from 'lucide-react';
+import { BarChart3, Bell, CalendarDays, Check, ClipboardList, Download, FileText, Globe, Home, KeyRound, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, UserRound, Users, X } from 'lucide-react';
 import {
   Agent, Category, Collection, Recommendation, Session, Tab, categories, categoryStyles, compact, etb,
-  formatDayLabel, isoToday, currentDateLabel, currentMonth, currentYear, fiscalYearLabel, seedAgents,
+  formatDayLabel, isoToday, todayISO, currentDateLabel, currentMonth, currentYear, fiscalYearLabel,
+  initialsOf, normalizeCategory,
 } from '@/types';
 import { LangProvider, useLang } from '@/i18n';
 import { AgentSettings } from '@/components/AgentSettings';
@@ -13,28 +15,7 @@ import { AgentEntry } from '@/components/AgentEntry';
 import { AgentHistory } from '@/components/AgentHistory';
 import { AdminRecommendations } from '@/components/AdminRecommendations';
 import { supabase } from '@/supabase';
-
-function usePersistent<T>(key: string, fallback: T) {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const saved = localStorage.getItem(key);
-      return saved ? JSON.parse(saved) : fallback;
-    } catch {
-      return fallback;
-    }
-  });
-
-  const update = (next: T | ((current: T) => T)) => {
-    setValue((current) => {
-      const resolved = typeof next === 'function' ? (next as (prev: T) => T)(current) : next;
-      localStorage.setItem(key, JSON.stringify(resolved));
-      return resolved;
-    });
-  };
-
-  return [value, update] as const;
-}
-
+import { toEmail } from '@/auth';
 
 /* ---------- Shared normalization helpers ---------- */
 
@@ -48,13 +29,123 @@ function sameAgentId(left: unknown, right: unknown): boolean {
   return a !== '' && b !== '' && a === b;
 }
 
-// Keep existing Supabase records compatible after the category rename.
-// Old values: Chat Royalty -> Chat, Traffic Fines -> Royalty.
-function normalizeCategory(value: unknown): Category {
-  const category = String(value ?? '').trim();
-  if (category === 'Chat Royalty' || category === 'Chat') return 'Chat';
-  if (category === 'Traffic Fines' || category === 'Royalty') return 'Royalty';
-  return 'Other Revenue';
+/* ---------- Database rows -> UI objects ---------- */
+
+type ProfileRow = {
+  id: string;
+  username: string | null;
+  full_name: string | null;
+  role: string | null;
+  active: boolean | null;
+  daily_target: number | string | null;
+};
+
+type CollectionRow = {
+  id: string;
+  agent_id: string;
+  category: unknown;
+  amount: unknown;
+  receipt_number: string | null;
+  notes: string | null;
+  collected_at: string | null;
+  created_at: string | null;
+};
+
+type RecommendationRow = {
+  id: string;
+  agent_id: string;
+  message: string;
+  created_at: string;
+};
+
+const PROFILE_COLUMNS = 'id, username, full_name, role, active, daily_target';
+const COLLECTION_COLUMNS = 'id, agent_id, category, amount, receipt_number, notes, collected_at, created_at';
+const RECOMMENDATION_COLUMNS = 'id, agent_id, message, created_at';
+
+function profileToAgent(profile: ProfileRow): Agent {
+  const username = String(profile.username ?? '').trim();
+  const name = String(profile.full_name ?? '').trim() || username;
+  const daily = Number(profile.daily_target) || 0;
+  return {
+    id: normalizeId(profile.id),
+    name,
+    username,
+    daily,
+    monthly: daily * 30,
+    annual: daily * 365,
+    active: profile.active !== false,
+    avatar: initialsOf(name),
+  };
+}
+
+function rowToCollection(item: CollectionRow): Collection {
+  const rawDate = item.collected_at ?? item.created_at ?? '';
+  return {
+    id: String(item.id),
+    agentId: normalizeId(item.agent_id),
+    category: normalizeCategory(item.category),
+    amount: Number(item.amount) || 0,
+    receipt: item.receipt_number ?? '',
+    notes: item.notes ?? '',
+    date: String(rawDate).trim().split('T')[0],
+  };
+}
+
+function rowToRecommendation(item: RecommendationRow): Recommendation {
+  return {
+    id: String(item.id),
+    agentId: normalizeId(item.agent_id),
+    message: item.message,
+    createdAt: item.created_at,
+  };
+}
+
+/**
+ * Supabase returns at most 1000 rows per request, so read the table page by page.
+ * The result is OLDEST -> NEWEST (the rest of the app calls .reverse() to show newest first).
+ */
+async function fetchAllCollections(sb: SupabaseClient): Promise<CollectionRow[]> {
+  const pageSize = 1000;
+  const rows: CollectionRow[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await sb
+      .from('collections')
+      .select(COLLECTION_COLUMNS)
+      .order('collected_at', { ascending: true })
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    const page = (data ?? []) as CollectionRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return rows;
+}
+
+type SessionResult = { session: Session | null; reason?: 'inactive' | 'missing' };
+
+/** Reads the signed-in user's profile and decides if he is an admin or an agent. */
+async function buildSession(userId: string): Promise<SessionResult> {
+  if (!supabase) return { session: null, reason: 'missing' };
+  const { data, error } = await supabase.from('profiles').select(PROFILE_COLUMNS).eq('id', userId).maybeSingle();
+  if (error || !data) return { session: null, reason: 'missing' };
+  const profile = data as ProfileRow;
+  if (profile.active === false) return { session: null, reason: 'inactive' };
+  const agent = profileToAgent(profile);
+  return {
+    session: profile.role === 'admin'
+      ? { role: 'admin', name: agent.name }
+      : { role: 'agent', agentId: agent.id, name: agent.name },
+  };
+}
+
+function Splash() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#102a43]">
+      <span className="h-9 w-9 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+    </div>
+  );
 }
 
 function App() {
@@ -66,99 +157,190 @@ function App() {
 }
 
 function AppInner() {
-  const { t, lang, setLang } = useLang();
+  const { lang } = useLang();
+  const tr = (en: string, am: string) => (lang === 'am' ? am : en);
+
   const [session, setSession] = useState<Session | null>(null);
-  const [agents, setAgents] = usePersistent<Agent[]>('revenue-agents-v3', seedAgents);
+  const [booting, setBooting] = useState(true);
+  const [dataReady, setDataReady] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
-  const [adminPassword, setAdminPassword] = usePersistent<string>('revenue-admin-pw', 'admin123');
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
 
+  /* 1. Restore the saved Supabase sign-in when the app opens */
   useEffect(() => {
+    const sb = supabase;
+    if (!sb) {
+      setBooting(false);
+      return;
+    }
     let cancelled = false;
 
-    const loadCollections = async () => {
-      if (!supabase) return;
-
-      // Supabase collections.agent_id stores the real profile UUID.
-      // The UI agents use local ids such as a1/a2. Map UUID -> local agent id
-      // so Overview, Reports, History and Agent Management all use the same id.
-      const { data: profiles, error: profilesError } = await supabase
-        .from('profiles')
-        .select('id, username, daily_target');
-
-      if (profilesError) {
-        console.error('Profiles load error:', profilesError);
-      }
-
-      const profileToLocalAgent = new Map<string, string>();
-
-      (profiles ?? []).forEach((profile) => {
-        const username = String(profile.username ?? '').trim().toLowerCase();
-        const localAgent = agents.find(
-          (a) => a.username.trim().toLowerCase() === username
-        );
-
-        if (localAgent) {
-          const dailyTarget = Number(profile.daily_target);
-
-          // The database value is the source of truth for the agent target.
-          // Only replace the local/default value when the DB has a real target.
-          if (profile.daily_target !== null && profile.daily_target !== undefined && Number.isFinite(dailyTarget) && dailyTarget >= 0) {
-            const nextDaily = dailyTarget;
-            if (localAgent.daily !== nextDaily) {
-              setAgents((current) => current.map((a) =>
-                a.id === localAgent.id
-                  ? { ...a, daily: nextDaily, monthly: nextDaily * 30, annual: nextDaily * 365 }
-                  : a
-              ));
-            }
-          }
-
-          profileToLocalAgent.set(String(profile.id).trim(), localAgent.id);
+    (async () => {
+      const { data } = await sb.auth.getSession();
+      if (data.session) {
+        const result = await buildSession(data.session.user.id);
+        if (result.session) {
+          if (!cancelled) setSession(result.session);
+        } else {
+          await sb.auth.signOut();
         }
-      });
-
-      const { data, error } = await supabase
-        .from('collections')
-        .select('id, agent_id, category, amount, receipt_number, notes, collected_at, created_at')
-        .order('collected_at', { ascending: false });
-
-      if (error || cancelled) {
-        if (error) console.error('Collections load error:', error);
-        return;
       }
+      if (!cancelled) setBooting(false);
+    })();
 
-      setCollections((data ?? []).map((item) => {
-        const rawDate = item.collected_at ?? item.created_at ?? '';
-        const cleanDate = String(rawDate).trim().split('T')[0];
-        const supabaseAgentId = normalizeId(item.agent_id);
+    const { data: listener } = sb.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') setSession(null);
+    });
 
-        return {
-          id: item.id,
-          // Convert the Supabase UUID back to the local agent id used by the UI.
-          agentId: profileToLocalAgent.get(supabaseAgentId) ?? supabaseAgentId,
-          category: normalizeCategory(item.category),
-          amount: Number(item.amount) || 0,
-          receipt: item.receipt_number ?? '',
-          notes: item.notes ?? '',
-          date: cleanDate,
-        };
-      }));
+    return () => {
+      cancelled = true;
+      listener.subscription.unsubscribe();
     };
+  }, []);
 
-    loadCollections();
+  /* 2. Load agents, collections and recommendations once signed in.
+        Row Level Security in the database decides what each person may read. */
+  useEffect(() => {
+    const sb = supabase;
+    if (!session || !sb) {
+      setAgents([]);
+      setCollections([]);
+      setRecommendations([]);
+      setDataReady(false);
+      return;
+    }
+    let cancelled = false;
+    setDataReady(false);
+    setLoadError('');
+
+    (async () => {
+      try {
+        const profilesRequest = session.role === 'admin'
+          ? sb.from('profiles').select(PROFILE_COLUMNS).neq('role', 'admin').order('username')
+          : sb.from('profiles').select(PROFILE_COLUMNS).eq('id', session.agentId ?? '');
+
+        const [profilesResult, collectionRows, recommendationsResult] = await Promise.all([
+          profilesRequest,
+          fetchAllCollections(sb),
+          sb.from('recommendations').select(RECOMMENDATION_COLUMNS).order('created_at', { ascending: false }),
+        ]);
+
+        if (profilesResult.error) throw profilesResult.error;
+        if (recommendationsResult.error) throw recommendationsResult.error;
+        if (cancelled) return;
+
+        setAgents(((profilesResult.data ?? []) as ProfileRow[]).map(profileToAgent));
+        setCollections(collectionRows.map(rowToCollection));
+        setRecommendations(((recommendationsResult.data ?? []) as RecommendationRow[]).map(rowToRecommendation));
+        setDataReady(true);
+      } catch (err) {
+        console.error('Data load error:', err);
+        if (!cancelled) setLoadError((err as { message?: string })?.message ?? 'Unknown error');
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [agents]);
+  }, [session]);
 
-  const handleSaveRecommendation = async (recommendation: Recommendation) => {
-    setRecommendations((prev) => [recommendation, ...prev]);
+  /* 3. Live updates: new collections / recommendations appear without refreshing */
+  useEffect(() => {
+    const sb = supabase;
+    if (!session || !sb) return;
+
+    const channel = sb
+      .channel('live-data')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'collections' }, (payload) => {
+        const row = rowToCollection(payload.new as CollectionRow);
+        setCollections((current) => (current.some((item) => item.id === row.id) ? current : [...current, row]));
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'recommendations' }, (payload) => {
+        const row = rowToRecommendation(payload.new as RecommendationRow);
+        setRecommendations((current) => (current.some((item) => item.id === row.id) ? current : [row, ...current]));
+      })
+      .subscribe();
+
+    return () => {
+      void sb.removeChannel(channel);
+    };
+  }, [session]);
+
+  /* 4. "Today" is calculated when the page loads. If the app stays open past midnight, reload it. */
+  useEffect(() => {
+    const check = () => {
+      if (todayISO() !== isoToday) window.location.reload();
+    };
+    const timer = window.setInterval(check, 60_000);
+    document.addEventListener('visibilitychange', check);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, []);
+
+  const handleLogin = async (userId: string): Promise<'inactive' | 'missing' | null> => {
+    const result = await buildSession(userId);
+    if (result.session) {
+      setSession(result.session);
+      return null;
+    }
+    await supabase?.auth.signOut();
+    return result.reason ?? 'missing';
   };
 
-  if (!session) {
-    return <Login onLogin={setSession} agents={agents} adminPassword={adminPassword} />;
+  const handleLogout = async () => {
+    await supabase?.auth.signOut();
+    setSession(null);
+  };
+
+  /** Saves the recommendation in the database (it used to live only in the browser). Throws on failure. */
+  const handleSaveRecommendation = async (recommendation: Recommendation) => {
+    if (!supabase) throw new Error('Database connection is not configured.');
+    const { data, error } = await supabase
+      .from('recommendations')
+      .insert({ agent_id: recommendation.agentId, message: recommendation.message })
+      .select(RECOMMENDATION_COLUMNS)
+      .single();
+    if (error) throw error;
+    const saved = rowToRecommendation(data as RecommendationRow);
+    setRecommendations((current) => (current.some((item) => item.id === saved.id) ? current : [saved, ...current]));
+  };
+
+  if (booting) return <Splash />;
+
+  if (!supabase) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#102a43] p-6 text-center text-sm text-[#bcccdc]">
+        {tr(
+          'Database connection is not configured (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY).',
+          'የዳታቤዝ ግንኙነት አልተዘጋጀም (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)።',
+        )}
+      </div>
+    );
+  }
+
+  if (!session) return <Login onLogin={handleLogin} />;
+
+  if (!dataReady) {
+    if (!loadError) return <Splash />;
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#102a43] p-6 text-center">
+        <p className="max-w-md text-sm text-[#bcccdc]">
+          {tr('Could not load data', 'መረጃውን መጫን አልተቻለም')}: {loadError}
+        </p>
+        <div className="flex gap-3">
+          <button onClick={() => window.location.reload()} className="rounded-xl bg-[#2cb67d] px-5 py-3 text-sm font-bold text-white">
+            {tr('Try again', 'እንደገና ሞክር')}
+          </button>
+          <button onClick={handleLogout} className="rounded-xl border border-white/20 px-5 py-3 text-sm font-bold text-[#bcccdc]">
+            {tr('Sign out', 'ውጣ')}
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -170,9 +352,7 @@ function AppInner() {
       setCollections={setCollections}
       recommendations={recommendations}
       onSaveRecommendation={handleSaveRecommendation}
-      adminPassword={adminPassword}
-      setAdminPassword={setAdminPassword}
-      onLogout={() => setSession(null)}
+      onLogout={handleLogout}
     />
   );
 }
@@ -196,67 +376,44 @@ function LangToggle({ dark }: { dark?: boolean }) {
   );
 }
 
-/* ---------- Login + Forgot Password ---------- */
+/* ---------- Login (Supabase Auth) ---------- */
 
-function Login({ onLogin, agents, adminPassword }: { onLogin: (session: Session) => void; agents: Agent[]; adminPassword: string }) {
-  const { t } = useLang();
+function Login({ onLogin }: { onLogin: (userId: string) => Promise<'inactive' | 'missing' | null> }) {
+  const { t, lang } = useLang();
+  const tr = (en: string, am: string) => (lang === 'am' ? am : en);
   const [mode, setMode] = useState<'login' | 'forgot'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // forgot password state
-  const [forgotUsername, setForgotUsername] = useState('');
-  const [forgotNewPw, setForgotNewPw] = useState('');
-  const [forgotConfirmPw, setForgotConfirmPw] = useState('');
-  const [forgotError, setForgotError] = useState('');
-  const [forgotSuccess, setForgotSuccess] = useState(false);
-
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (!supabase || loading) return;
     setLoading(true);
     setError('');
-    setTimeout(() => {
-      if (username === 'admin' && password === adminPassword) {
-        onLogin({ role: 'admin', name: 'Nuru Mohammed' });
-      } else {
-        const agent = agents.find((item) => item.username === username);
-        if (agent && agent.active && password === agent.password) {
-          onLogin({ role: 'agent', agentId: agent.id, name: agent.name });
-        } else {
-          setError(t('incorrectCredentials'));
-        }
-      }
+
+    const { data, error: authError } = await supabase.auth.signInWithPassword({
+      email: toEmail(username),
+      password,
+    });
+
+    if (authError || !data.user) {
+      setError(t('incorrectCredentials'));
       setLoading(false);
-    }, 500);
+      return;
+    }
+
+    const problem = await onLogin(data.user.id);
+    if (problem === 'inactive') {
+      setError(tr('This account is inactive. Please contact the administrator.', 'ይህ መለያ ንቁ አይደለም። እባክዎ አስተዳዳሪውን ያነጋግሩ።'));
+    } else if (problem) {
+      setError(tr('Your profile was not found. Please contact the administrator.', 'የእርስዎ ፕሮፋይል አልተገኘም። እባክዎ አስተዳዳሪውን ያነጋግሩ።'));
+    }
+    setLoading(false);
   };
 
-  const submitForgot = (event: FormEvent) => {
-    event.preventDefault();
-    setForgotError('');
-    const agent = agents.find((a) => a.username === forgotUsername.trim().toLowerCase());
-    if (!agent) {
-      setForgotError(t('usernameNotFound'));
-      return;
-    }
-    if (forgotNewPw.length < 6) {
-      setForgotError(t('passwordTooShort'));
-      return;
-    }
-    if (forgotNewPw !== forgotConfirmPw) {
-      setForgotError(t('passwordsDoNotMatch'));
-      return;
-    }
-    const newPassword = forgotNewPw;
-    const stored = localStorage.getItem('revenue-agents-v3');
-    if (stored) {
-      const parsed: Agent[] = JSON.parse(stored);
-      const updated = parsed.map((a) => a.id === agent.id ? { ...a, password: newPassword } : a);
-      localStorage.setItem('revenue-agents-v3', JSON.stringify(updated));
-    }
-    setForgotSuccess(true);
-  };
+  const inputClass = 'w-full rounded-xl border border-[#d9e2ec] bg-[#f8fafc] px-4 py-3.5 text-sm outline-none transition focus:border-[#2cb67d] focus:ring-4 focus:ring-[#2cb67d]/10';
 
   return (
     <div className="min-h-screen bg-[#102a43] flex items-center justify-center p-5 relative overflow-hidden">
@@ -280,9 +437,6 @@ function Login({ onLogin, agents, adminPassword }: { onLogin: (session: Session)
           {mode === 'login' ? (
             <>
               <div className="mb-8">
-                <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-[#e5f6ef] px-3 py-1 text-xs font-semibold text-[#157a56]">
-                 
-                </div>
                 <h1 className="font-display text-3xl font-bold text-[#102a43]">{t('welcomeBack')}</h1>
                 <p className="mt-2 text-sm leading-6 text-[#627d98]">{t('signInDescription')}</p>
               </div>
@@ -291,12 +445,27 @@ function Login({ onLogin, agents, adminPassword }: { onLogin: (session: Session)
                   <span className="mb-2 block text-sm font-semibold text-[#334e68]">{t('usernameOrEmail')}</span>
                   <div className="relative">
                     <UserRound className="absolute left-4 top-3.5 text-[#829ab1]" size={18} />
-                    <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full rounded-xl border border-[#d9e2ec] bg-[#f8fafc] py-3.5 pl-11 pr-4 text-sm outline-none transition focus:border-[#2cb67d] focus:ring-4 focus:ring-[#2cb67d]/10" placeholder={t('enterUsername')} />
+                    <input
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      autoComplete="username"
+                      className={`${inputClass} pl-11`}
+                      placeholder={t('enterUsername')}
+                    />
                   </div>
                 </label>
                 <label className="block">
                   <span className="mb-2 block text-sm font-semibold text-[#334e68]">{t('password')}</span>
-                  <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full rounded-xl border border-[#d9e2ec] bg-[#f8fafc] px-4 py-3.5 text-sm outline-none transition focus:border-[#2cb67d] focus:ring-4 focus:ring-[#2cb67d]/10" placeholder={t('enterPassword')} />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="current-password"
+                    className={inputClass}
+                    placeholder={t('enterPassword')}
+                  />
                 </label>
                 {error && <div className="rounded-xl bg-[#fff1f0] px-4 py-3 text-sm text-[#c0392b]">{error}</div>}
                 <button disabled={loading} className="w-full rounded-xl bg-[#102a43] py-3.5 text-sm font-bold text-white transition hover:bg-[#173f61] disabled:opacity-70">
@@ -304,7 +473,7 @@ function Login({ onLogin, agents, adminPassword }: { onLogin: (session: Session)
                 </button>
               </form>
               <div className="mt-4 text-center">
-                <button onClick={() => { setMode('forgot'); setForgotError(''); setForgotSuccess(false); }} className="text-xs font-semibold text-[#2d7dd2] hover:underline">
+                <button onClick={() => setMode('forgot')} className="text-xs font-semibold text-[#2d7dd2] hover:underline">
                   {t('forgotPassword')}
                 </button>
               </div>
@@ -313,46 +482,22 @@ function Login({ onLogin, agents, adminPassword }: { onLogin: (session: Session)
                 <p className="text-xs leading-5 text-[#627d98]">{t('accessManagedByAdmin')}</p>
               </div>
             </>
-          ) : forgotSuccess ? (
-            <div className="py-6 text-center">
-              <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-[#e5f6ef]">
-                <Check size={32} className="text-[#2cb67d]" />
+          ) : (
+            <div className="py-4 text-center">
+              <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-[#eaf2fb]">
+                <KeyRound size={30} className="text-[#2d7dd2]" />
               </div>
-              <h1 className="font-display text-2xl font-bold text-[#102a43]">{t('passwordResetSuccess')}</h1>
-              <p className="mt-3 text-sm text-[#627d98]">{t('passwordResetSuccessDesc')}</p>
-              <button onClick={() => { setMode('login'); setForgotSuccess(false); setForgotUsername(''); setForgotNewPw(''); setForgotConfirmPw(''); }} className="mt-6 w-full rounded-xl bg-[#102a43] py-3.5 text-sm font-bold text-white hover:bg-[#173f61]">
+              <h1 className="font-display text-2xl font-bold text-[#102a43]">{t('forgotPasswordTitle')}</h1>
+              <p className="mt-3 text-sm leading-6 text-[#627d98]">
+                {tr(
+                  'For security, passwords are reset by the office administrator. Please contact the administrator and ask for a new password.',
+                  'ለደህንነት ሲባል የይለፍ ቃል የሚቀይረው የቢሮው አስተዳዳሪ ነው። እባክዎ አስተዳዳሪውን አነጋግረው አዲስ የይለፍ ቃል ይጠይቁ።',
+                )}
+              </p>
+              <button onClick={() => setMode('login')} className="mt-6 w-full rounded-xl bg-[#102a43] py-3.5 text-sm font-bold text-white hover:bg-[#173f61]">
                 {t('backToSignIn')}
               </button>
             </div>
-          ) : (
-            <>
-              <div className="mb-8">
-                <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-[#eaf2fb] px-3 py-1 text-xs font-semibold text-[#2d7dd2]">
-                  <KeyRound size={14} /> {t('resetPassword')}
-                </div>
-                <h1 className="font-display text-3xl font-bold text-[#102a43]">{t('forgotPasswordTitle')}</h1>
-                <p className="mt-2 text-sm leading-6 text-[#627d98]">{t('forgotPasswordDesc')}</p>
-              </div>
-              <form onSubmit={submitForgot} className="space-y-5">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-semibold text-[#334e68]">{t('username')}</span>
-                  <input required value={forgotUsername} onChange={(e) => setForgotUsername(e.target.value)} className="w-full rounded-xl border border-[#d9e2ec] bg-[#f8fafc] px-4 py-3.5 text-sm outline-none transition focus:border-[#2cb67d] focus:ring-4 focus:ring-[#2cb67d]/10" placeholder={t('enterUsername')} />
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-semibold text-[#334e68]">{t('newPassword')}</span>
-                  <input type="password" required value={forgotNewPw} onChange={(e) => setForgotNewPw(e.target.value)} className="w-full rounded-xl border border-[#d9e2ec] bg-[#f8fafc] px-4 py-3.5 text-sm outline-none transition focus:border-[#2cb67d] focus:ring-4 focus:ring-[#2cb67d]/10" placeholder={t('atLeast6Chars')} />
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-semibold text-[#334e68]">{t('confirmPassword')}</span>
-                  <input type="password" required value={forgotConfirmPw} onChange={(e) => setForgotConfirmPw(e.target.value)} className="w-full rounded-xl border border-[#d9e2ec] bg-[#f8fafc] px-4 py-3.5 text-sm outline-none transition focus:border-[#2cb67d] focus:ring-4 focus:ring-[#2cb67d]/10" placeholder={t('reenterNewPassword')} />
-                </label>
-                {forgotError && <div className="rounded-xl bg-[#fff1f0] px-4 py-3 text-sm text-[#c0392b]">{forgotError}</div>}
-                <button type="submit" className="w-full rounded-xl bg-[#102a43] py-3.5 text-sm font-bold text-white transition hover:bg-[#173f61]">{t('reset')}</button>
-              </form>
-              <div className="mt-4 text-center">
-                <button onClick={() => { setMode('login'); setForgotError(''); }} className="text-xs font-semibold text-[#2d7dd2] hover:underline">{t('backToSignIn')}</button>
-              </div>
-            </>
           )}
         </div>
         <p className="mt-6 text-center text-xs text-[#9fb3c8]">{t('revenueCollectionOffice')} · {fiscalYearLabel}</p>
@@ -369,8 +514,6 @@ type ShellProps = {
   setCollections: (next: Collection[] | ((current: Collection[]) => Collection[])) => void;
   recommendations: Recommendation[];
   onSaveRecommendation: (recommendation: Recommendation) => Promise<void>;
-  adminPassword: string;
-  setAdminPassword: (next: string) => void;
   onLogout: () => void;
 };
 
@@ -430,7 +573,7 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
   );
 }
 
-function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, adminPassword, setAdminPassword, onLogout }: ShellProps) {
+function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, onLogout }: ShellProps) {
   const { t } = useLang();
   const [tab, setTab] = useState<Tab>(session.role === 'admin' ? 'overview' : 'entry');
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -513,7 +656,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             <NotificationBell agents={agents} collections={collections} isAdmin={isAdmin} agentId={session.agentId} />
             <div className="hidden h-8 w-px bg-[#d9e2ec] sm:block" />
             <div className="hidden text-right sm:block">
-              <div className="text-sm font-semibold">{isAdmin ? 'Nuru Mohammed' : session.name}</div>
+              <div className="text-sm font-semibold">{session.name}</div>
               <div className="text-xs text-[#829ab1]">{isAdmin ? t('administrator') : t('fieldAgent')}</div>
             </div>
           </div>
@@ -528,7 +671,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             ) : tab === 'recommendations' ? (
               <AdminRecommendations agents={agents} collections={collections} recommendations={recommendations} onSave={onSaveRecommendation} />
             ) : tab === 'settings' ? (
-              <AdminSettings adminPassword={adminPassword} setAdminPassword={setAdminPassword} onLogout={onLogout} />
+              <AdminSettings name={session.name} onLogout={onLogout} />
             ) : (
               <Reports agents={agents} collections={collections} />
             )
@@ -537,7 +680,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
           ) : tab === 'collect' ? (
             <AgentEntry agent={currentAgent} collections={collections} setCollections={setCollections} onDone={() => go('history')} />
           ) : tab === 'settings' ? (
-            <AgentSettings agent={currentAgent} setAgents={setAgents} onLogout={onLogout} />
+            <AgentSettings agent={currentAgent} onLogout={onLogout} />
           ) : (
             <AgentHistory agent={currentAgent} collections={collections} />
           )}
@@ -609,7 +752,8 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
     name: catLabels[category],
     value: collections.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0),
   }));
-  const chartData = agents.slice(0, 6).map((agent) => ({
+  const chartData = agents.map((agent) => ({
+    id: agent.id,
     name: agent.name.split(' ')[0],
     target: agent.daily,
     actual: collections.filter((item) => sameAgentId(item.agentId, agent.id) && item.date === isoToday).reduce((sum, item) => sum + item.amount, 0),
@@ -643,7 +787,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
                 <Tooltip formatter={(v) => etb(Number(v))} contentStyle={{ border: '1px solid #d9e2ec', borderRadius: 12, fontSize: 12 }} />
                 <Bar dataKey="target" radius={[5, 5, 0, 0]} name={t('dailyTarget')}>
                   {chartData.map((entry) => (
-                    <Cell key={`target-${entry.name}`} fill="#2cb67d" />
+                    <Cell key={`target-${entry.id}`} fill="#2cb67d" />
                   ))}
                 </Bar>
                 <Bar dataKey="actual" radius={[5, 5, 0, 0]} name={t('totalCollected')}>
@@ -652,7 +796,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
                       ? (entry.actual / entry.target) * 100
                       : 0;
                     const fill = performance >= 50 ? '#e4b44c' : '#c0392b';
-                    return <Cell key={`actual-${entry.name}`} fill={fill} />;
+                    return <Cell key={`actual-${entry.id}`} fill={fill} />;
                   })}
                 </Bar>
               </BarChart>
@@ -736,56 +880,109 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
 
 /* ---------- Agent Management ---------- */
 
+/** Calls the admin-only edge function (needed for creating logins / resetting passwords). */
+async function callManageAgent(body: Record<string, unknown>): Promise<{ id?: string; error?: string }> {
+  if (!supabase) return { error: 'Database connection is not configured.' };
+  const { data, error } = await supabase.functions.invoke('manage-agent', { body });
+  if (error) {
+    let message = error.message;
+    const context = (error as { context?: Response }).context;
+    if (context && typeof context.json === 'function') {
+      try {
+        const parsed = await context.json();
+        if (parsed?.error) message = String(parsed.error);
+      } catch {
+        /* keep the default message */
+      }
+    }
+    return { error: message };
+  }
+  if (data?.error) return { error: String(data.error) };
+  return { id: data?.id as string | undefined };
+}
+
 function AgentManagement({ agents, setAgents, collections }: { agents: Agent[]; setAgents: (next: Agent[] | ((current: Agent[]) => Agent[])) => void; collections: Collection[] }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
+  const tr = (en: string, am: string) => (lang === 'am' ? am : en);
   const [showAdd, setShowAdd] = useState(false);
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<Agent | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const visible = agents.filter((a) => a.name.toLowerCase().includes(search.toLowerCase()) || a.username.includes(search));
+  const [newPassword, setNewPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  const query = search.trim().toLowerCase();
+  const visible = agents.filter((a) => a.name.toLowerCase().includes(query) || a.username.toLowerCase().includes(query));
+
+  const closeEdit = () => {
+    setEditing(null);
+    setDraft(null);
+    setNewPassword('');
+    setSaveError('');
+  };
+
   const save = async () => {
-    if (!draft) return;
+    if (!draft || saving) return;
 
     if (!supabase) {
-      window.alert('Database connection is not configured.');
+      setSaveError('Database connection is not configured.');
       return;
     }
 
+    const name = draft.name.trim();
     const dailyTarget = Number(draft.daily);
+    if (!name) {
+      setSaveError(tr('Full name is required.', 'ሙሉ ስም ያስፈልጋል።'));
+      return;
+    }
     if (!Number.isFinite(dailyTarget) || dailyTarget < 0) {
-      window.alert('Please enter a valid daily target.');
+      setSaveError(tr('Please enter a valid daily target.', 'ትክክለኛ ዕለታዊ ኢላማ ያስገቡ።'));
+      return;
+    }
+    if (newPassword && newPassword.length < 6) {
+      setSaveError(t('passwordTooShort'));
       return;
     }
 
-    // Save the edited target to the real Supabase profile first.
-    // The UI is updated only after the database update succeeds.
+    setSaving(true);
+    setSaveError('');
+
+    // The database is updated first; the screen changes only if that succeeds.
     const { error } = await supabase
       .from('profiles')
-      .update({ daily_target: dailyTarget })
-      .eq('username', draft.username);
+      .update({ full_name: name, daily_target: dailyTarget, active: draft.active })
+      .eq('id', draft.id);
 
     if (error) {
       console.error('Agent profile update error:', error);
-      window.alert(`Could not save agent changes: ${error.message}`);
+      setSaveError(error.message);
+      setSaving(false);
       return;
+    }
+
+    if (newPassword) {
+      const result = await callManageAgent({ action: 'reset-password', id: draft.id, password: newPassword });
+      if (result.error) {
+        setSaveError(`${tr('Saved, but the password was not changed', 'ተቀምጧል፣ ግን የይለፍ ቃሉ አልተቀየረም')}: ${result.error}`);
+        setSaving(false);
+        setAgents((current) => current.map((a) => (a.id === draft.id ? { ...draft, name, daily: dailyTarget, monthly: dailyTarget * 30, annual: dailyTarget * 365, avatar: initialsOf(name) } : a)));
+        return;
+      }
     }
 
     const savedDraft: Agent = {
       ...draft,
+      name,
+      avatar: initialsOf(name),
       daily: dailyTarget,
       monthly: dailyTarget * 30,
       annual: dailyTarget * 365,
     };
 
     setAgents((current) => current.map((a) => (a.id === savedDraft.id ? savedDraft : a)));
-    setEditing(null);
-    setDraft(null);
-  };
-  const confirmDelete = () => {
-    if (!deleting) return;
-    setAgents((current) => current.filter((a) => a.id !== deleting));
-    setDeleting(null);
+    setSaving(false);
+    closeEdit();
   };
 
   return (
@@ -846,8 +1043,7 @@ function AgentManagement({ agents, setAgents, collections }: { agents: Agent[]; 
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => { setEditing(agent.id); setDraft({ ...agent }); }} className="rounded-lg p-2 text-[#627d98] hover:bg-[#f4f7fb]"><Settings2 size={17} /></button>
-                        <button onClick={() => setDeleting(agent.id)} className="rounded-lg p-2 text-[#c0392b] hover:bg-[#fff1f0]"><Trash2 size={16} /></button>
+                        <button onClick={() => { setEditing(agent.id); setDraft({ ...agent }); setNewPassword(''); setSaveError(''); }} className="rounded-lg p-2 text-[#627d98] hover:bg-[#f4f7fb]"><Settings2 size={17} /></button>
                       </div>
                     </td>
                   </tr>
@@ -858,31 +1054,82 @@ function AgentManagement({ agents, setAgents, collections }: { agents: Agent[]; 
         </div>
       </div>
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} onAdd={(agent) => { setAgents((current) => [...current, agent]); setShowAdd(false); }} />}
-      {editing && draft && <EditAgentModal draft={draft} setDraft={setDraft} onClose={() => { setEditing(null); setDraft(null); }} onSave={save} />}
-      {deleting && <DeleteAgentModal agent={agents.find((a) => a.id === deleting)!} onClose={() => setDeleting(null)} onConfirm={confirmDelete} />}
+      {editing && draft && (
+        <EditAgentModal
+          draft={draft}
+          setDraft={setDraft}
+          newPassword={newPassword}
+          setNewPassword={setNewPassword}
+          saving={saving}
+          error={saveError}
+          onClose={closeEdit}
+          onSave={save}
+        />
+      )}
     </>
   );
 }
 
 function AddAgentModal({ onClose, onAdd }: { onClose: () => void; onAdd: (agent: Agent) => void }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
+  const tr = (en: string, am: string) => (lang === 'am' ? am : en);
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [daily, setDaily] = useState('20000');
-  const [password, setPassword] = useState('agent123');
-  const submit = (e: FormEvent) => {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!name || !username || !password) return;
+    if (busy) return;
+
+    const cleanName = name.trim();
+    const cleanUsername = username.trim().toLowerCase();
     const dailyNum = Number(daily);
-    onAdd({ id: `a-${Date.now()}`, name, username, password, daily: dailyNum, monthly: dailyNum * 30, annual: dailyNum * 365, active: true, avatar: name.split(' ').map((x) => x[0]).join('').slice(0, 2).toUpperCase() });
+
+    if (!/^[a-z0-9._-]{3,30}$/.test(cleanUsername)) {
+      setError(tr('Username must be 3–30 characters: letters (a–z), numbers, . _ -', 'የተጠቃሚ ስም 3–30 ቁምፊ መሆን አለበት፦ ፊደል (a–z)፣ ቁጥር፣ . _ -'));
+      return;
+    }
+    if (password.length < 6) {
+      setError(t('passwordTooShort'));
+      return;
+    }
+    if (!Number.isFinite(dailyNum) || dailyNum < 0) {
+      setError(tr('Please enter a valid daily target.', 'ትክክለኛ ዕለታዊ ኢላማ ያስገቡ።'));
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    const result = await callManageAgent({ action: 'create', name: cleanName, username: cleanUsername, password, daily: dailyNum });
+    setBusy(false);
+
+    if (result.error || !result.id) {
+      setError(result.error ?? tr('Could not create the agent.', 'ወኪሉን መፍጠር አልተቻለም።'));
+      return;
+    }
+
+    onAdd({
+      id: result.id,
+      name: cleanName,
+      username: cleanUsername,
+      daily: dailyNum,
+      monthly: dailyNum * 30,
+      annual: dailyNum * 365,
+      active: true,
+      avatar: initialsOf(cleanName),
+    });
   };
+
   return (
     <Modal title={t('addFieldAgent')} onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
         <Field label={t('fullName')}><input required value={name} onChange={(e) => setName(e.target.value)} className="input" placeholder="e.g. Eden Kebede" /></Field>
-        <Field label={t('username')}><input required value={username} onChange={(e) => setUsername(e.target.value)} className="input" placeholder="e.g. eden" /></Field>
-        <Field label={t('temporaryPassword')}><input required value={password} onChange={(e) => setPassword(e.target.value)} className="input" placeholder={t('setInitialPassword')} /></Field>
-        <Field label={t('dailyTargetETB')}><input required type="number" value={daily} onChange={(e) => setDaily(e.target.value)} className="input" /></Field>
+        <Field label={t('username')}><input required value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" className="input" placeholder="e.g. eden" /></Field>
+        <Field label={t('temporaryPassword')}><input required minLength={6} value={password} onChange={(e) => setPassword(e.target.value)} className="input" placeholder={t('setInitialPassword')} /></Field>
+        <Field label={t('dailyTargetETB')}><input required type="number" min="0" value={daily} onChange={(e) => setDaily(e.target.value)} className="input" /></Field>
         <div className="grid grid-cols-2 gap-4">
           <div className="rounded-xl bg-[#f4f7fb] px-4 py-3">
             <div className="text-xs font-semibold text-[#829ab1]">{t('monthlyTargetETB')}</div>
@@ -895,19 +1142,32 @@ function AddAgentModal({ onClose, onAdd }: { onClose: () => void; onAdd: (agent:
         </div>
         <p className="rounded-xl bg-[#eaf2fb] p-3 text-xs leading-5 text-[#2d7dd2]">{t('autoCalculatedHint')}</p>
         <p className="rounded-xl bg-[#fff5dc] p-3 text-xs leading-5 text-[#8b650b]">{t('tempPasswordHint')}</p>
-        <button className="w-full rounded-xl bg-[#2cb67d] py-3.5 text-sm font-bold text-white">{t('createAgent')}</button>
+        {error && <div className="rounded-xl bg-[#fff1f0] px-4 py-3 text-sm text-[#c0392b]">{error}</div>}
+        <button disabled={busy} className="w-full rounded-xl bg-[#2cb67d] py-3.5 text-sm font-bold text-white disabled:opacity-70">
+          {busy ? t('saving') : t('createAgent')}
+        </button>
       </form>
     </Modal>
   );
 }
 
-function EditAgentModal({ draft, setDraft, onClose, onSave }: { draft: Agent; setDraft: (agent: Agent) => void; onClose: () => void; onSave: () => void }) {
-  const { t } = useLang();
+function EditAgentModal({ draft, setDraft, newPassword, setNewPassword, saving, error, onClose, onSave }: {
+  draft: Agent;
+  setDraft: (agent: Agent) => void;
+  newPassword: string;
+  setNewPassword: (value: string) => void;
+  saving: boolean;
+  error: string;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const { t, lang } = useLang();
+  const tr = (en: string, am: string) => (lang === 'am' ? am : en);
   return (
     <Modal title={t('manageAgent')} onClose={onClose}>
       <div className="space-y-4">
         <Field label={t('fullName')}><input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="input" /></Field>
-        <Field label={t('dailyTargetETB')}><input type="number" value={draft.daily} onChange={(e) => { const d = Number(e.target.value); setDraft({ ...draft, daily: d, monthly: d * 30, annual: d * 365 }); }} className="input" /></Field>
+        <Field label={t('dailyTargetETB')}><input type="number" min="0" value={draft.daily} onChange={(e) => { const d = Number(e.target.value); setDraft({ ...draft, daily: d, monthly: d * 30, annual: d * 365 }); }} className="input" /></Field>
         <div className="grid grid-cols-2 gap-4">
           <div className="rounded-xl bg-[#f4f7fb] px-4 py-3">
             <div className="text-xs font-semibold text-[#829ab1]">{t('monthlyTargetETB')}</div>
@@ -918,46 +1178,24 @@ function EditAgentModal({ draft, setDraft, onClose, onSave }: { draft: Agent; se
             <div className="mt-1 font-display font-bold text-[#102a43]">{etb(draft.annual)}</div>
           </div>
         </div>
-        
+
+        <Field label={`${t('newPassword')} (${tr('optional', 'አማራጭ')})`}>
+          <input value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="input" placeholder={tr('Leave empty to keep the current password', 'አሁን ያለውን ለማቆየት ባዶ ይተዉ')} />
+        </Field>
+
         <div className="flex items-center justify-between rounded-xl border border-[#d9e2ec] p-4">
           <div>
             <div className="text-sm font-semibold">{t('accountStatus')}</div>
             <div className="text-xs text-[#829ab1]">{t('allowSignIn')}</div>
           </div>
-          <button onClick={() => setDraft({ ...draft, active: !draft.active })} className={`h-6 w-11 rounded-full p-1 transition ${draft.active ? 'bg-[#2cb67d]' : 'bg-[#bcccdc]'}`}>
+          <button type="button" onClick={() => setDraft({ ...draft, active: !draft.active })} className={`h-6 w-11 rounded-full p-1 transition ${draft.active ? 'bg-[#2cb67d]' : 'bg-[#bcccdc]'}`}>
             <span className={`block h-4 w-4 rounded-full bg-white transition ${draft.active ? 'translate-x-5' : ''}`} />
           </button>
         </div>
+        {error && <div className="rounded-xl bg-[#fff1f0] px-4 py-3 text-sm text-[#c0392b]">{error}</div>}
         <div className="flex gap-3 pt-2">
           <button onClick={onClose} className="flex-1 rounded-xl border border-[#d9e2ec] py-3 text-sm font-bold text-[#627d98]">{t('cancel')}</button>
-          <button onClick={onSave} className="flex-1 rounded-xl bg-[#102a43] py-3 text-sm font-bold text-white">{t('saveChanges')}</button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function DeleteAgentModal({ agent, onClose, onConfirm }: { agent: Agent; onClose: () => void; onConfirm: () => void }) {
-  const { t } = useLang();
-  return (
-    <Modal title={t('deleteAgent')} onClose={onClose}>
-      <div className="space-y-5">
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#fff1f0] text-[#c0392b]">
-            <Trash2 size={22} />
-          </div>
-          <div>
-            <h4 className="font-display text-lg font-bold text-[#102a43]">{agent.name}</h4>
-            <p className="text-sm text-[#829ab1]">@{agent.username}</p>
-          </div>
-        </div>
-        <div className="rounded-xl bg-[#fff1f0] p-4">
-          <p className="text-sm font-semibold text-[#c0392b]">{t('deleteAgentConfirm')}</p>
-          <p className="mt-1 text-xs text-[#c0392b]/80">{t('deleteAgentWarning')}</p>
-        </div>
-        <div className="flex gap-3 pt-2">
-          <button onClick={onClose} className="flex-1 rounded-xl border border-[#d9e2ec] py-3 text-sm font-bold text-[#627d98]">{t('cancel')}</button>
-          <button onClick={onConfirm} className="flex-1 rounded-xl bg-[#c0392b] py-3 text-sm font-bold text-white hover:bg-[#a93226]">{t('confirmDelete')}</button>
+          <button onClick={onSave} disabled={saving} className="flex-1 rounded-xl bg-[#102a43] py-3 text-sm font-bold text-white disabled:opacity-70">{saving ? t('saving') : t('saveChanges')}</button>
         </div>
       </div>
     </Modal>
