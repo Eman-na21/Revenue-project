@@ -13,10 +13,14 @@ export type Agent = {
   avatar: string;
 };
 
+/** Royalty is split in two. Older Royalty records have no type (null). */
+export type RoyaltyType = 'forest' | 'sand';
+
 export type Collection = {
   id: string;
   agentId: string;
   category: Category;
+  royaltyType: RoyaltyType | null;
   amount: number;
   receipt: string;
   notes: string;
@@ -51,6 +55,62 @@ export const categoryStyles: Record<Category, { bg: string; text: string; solid:
   'Royalty': { bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]', light: 'bg-[#eaf2fb]' },
   'Other Revenue': { bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]', light: 'bg-[#fff5dc]' },
 };
+
+export const royaltyTypes: RoyaltyType[] = ['forest', 'sand'];
+
+export const normalizeRoyaltyType = (value: unknown): RoyaltyType | null => {
+  const v = String(value ?? '').trim().toLowerCase();
+  return v === 'forest' || v === 'sand' ? v : null;
+};
+
+export type Lang = 'en' | 'am';
+
+/**
+ * Every place that totals money by "kind of revenue" uses these buckets,
+ * so Forest Royalty and Sand Royalty always appear separately.
+ * "royalty_unspecified" holds OLD royalty records that were saved before the split.
+ */
+export type BucketKey = 'chat' | 'forest' | 'sand' | 'royalty_unspecified' | 'other';
+
+export type Bucket = {
+  key: BucketKey;
+  en: string;
+  am: string;
+  hex: string;
+  bg: string;
+  text: string;
+  solid: string;
+};
+
+export const revenueBuckets: Bucket[] = [
+  { key: 'chat', en: 'Chat', am: 'ጫት', hex: '#2cb67d', bg: 'bg-[#e5f6ef]', text: 'text-[#157a56]', solid: 'bg-[#2cb67d]' },
+  { key: 'forest', en: 'Forest Royalty', am: 'የደን ሮያሊቲ', hex: '#2d7dd2', bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]' },
+  { key: 'sand', en: 'Sand Royalty', am: 'የአሸዋ ሮያሊቲ', hex: '#0fa3b1', bg: 'bg-[#e0f5f7]', text: 'text-[#0b7f8a]', solid: 'bg-[#0fa3b1]' },
+  { key: 'royalty_unspecified', en: 'Royalty (not specified)', am: 'ሮያሊቲ (ያልተለየ)', hex: '#8aa4bd', bg: 'bg-[#eef2f6]', text: 'text-[#52677d]', solid: 'bg-[#8aa4bd]' },
+  { key: 'other', en: 'Other Revenue', am: 'ሌላ ገቢ', hex: '#e4b44c', bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]' },
+];
+
+export const bucketKeyOf = (item: Pick<Collection, 'category' | 'royaltyType'>): BucketKey => {
+  if (item.category === 'Chat') return 'chat';
+  if (item.category === 'Royalty') return item.royaltyType ?? 'royalty_unspecified';
+  return 'other';
+};
+
+export const bucketOf = (item: Pick<Collection, 'category' | 'royaltyType'>): Bucket =>
+  revenueBuckets.find((b) => b.key === bucketKeyOf(item)) ?? revenueBuckets[revenueBuckets.length - 1];
+
+/** Text shown for one record: "Forest Royalty" / "የደን ሮያሊቲ", otherwise the normal category name. */
+export const collectionLabel = (item: Pick<Collection, 'category' | 'royaltyType'>, lang: Lang): string =>
+  item.category === 'Royalty' ? (lang === 'am' ? bucketOf(item).am : bucketOf(item).en) : item.category;
+
+/** Totals per bucket. "Royalty (not specified)" is hidden when there is nothing in it. */
+export const bucketTotals = (items: Pick<Collection, 'category' | 'royaltyType' | 'amount'>[]) =>
+  revenueBuckets
+    .map((bucket) => ({
+      bucket,
+      amount: items.filter((c) => bucketKeyOf(c) === bucket.key).reduce((sum, c) => sum + (Number(c.amount) || 0), 0),
+    }))
+    .filter((row) => row.bucket.key !== 'royalty_unspecified' || row.amount > 0);
 
 /* ---------- Dates (always Ethiopian office time, independent of the phone's settings) ---------- */
 

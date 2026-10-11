@@ -3,9 +3,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { BarChart3, Bell, CalendarDays, Check, ClipboardList, Download, FileText, Globe, Home, KeyRound, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, UserRound, Users, X } from 'lucide-react';
 import {
-  Agent, Category, Collection, Recommendation, Session, Tab, categories, categoryStyles, compact, etb,
+  Agent, Category, Collection, Recommendation, Session, Tab, compact, etb,
   formatDayLabel, isoToday, todayISO, currentDateLabel, currentMonth, currentYear, fiscalYearLabel,
-  initialsOf, normalizeCategory,
+  initialsOf, normalizeCategory, normalizeRoyaltyType, bucketTotals, bucketOf, collectionLabel,
 } from '@/types';
 import { LangProvider, useLang } from '@/i18n';
 import { AgentSettings } from '@/components/AgentSettings';
@@ -44,6 +44,7 @@ type CollectionRow = {
   id: string;
   agent_id: string;
   category: unknown;
+  royalty_type?: string | null;
   amount: unknown;
   receipt_number: string | null;
   notes: string | null;
@@ -59,7 +60,7 @@ type RecommendationRow = {
 };
 
 const PROFILE_COLUMNS = 'id, username, full_name, role, active, daily_target';
-const COLLECTION_COLUMNS = 'id, agent_id, category, amount, receipt_number, notes, collected_at, created_at';
+const COLLECTION_COLUMNS = 'id, agent_id, category, royalty_type, amount, receipt_number, notes, collected_at, created_at';
 const RECOMMENDATION_COLUMNS = 'id, agent_id, message, created_at';
 
 function profileToAgent(profile: ProfileRow): Agent {
@@ -84,6 +85,7 @@ function rowToCollection(item: CollectionRow): Collection {
     id: String(item.id),
     agentId: normalizeId(item.agent_id),
     category: normalizeCategory(item.category),
+    royaltyType: normalizeCategory(item.category) === 'Royalty' ? normalizeRoyaltyType(item.royalty_type) : null,
     amount: Number(item.amount) || 0,
     receipt: item.receipt_number ?? '',
     notes: item.notes ?? '',
@@ -518,7 +520,7 @@ type ShellProps = {
 };
 
 function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: Agent[]; collections: Collection[]; isAdmin: boolean; agentId?: string }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [open, setOpen] = useState(false);
   const seenKey = `revenue-notifications-seen-${isAdmin ? 'admin' : agentId ?? ''}`;
   const seenCount = parseInt(localStorage.getItem(seenKey) ?? '0', 10);
@@ -551,14 +553,14 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
                 <div className="py-10 text-center text-sm text-[#829ab1]">{t('noNotifications')}</div>
               ) : recent.map((item, index) => {
                 const agent = agents.find((a) => sameAgentId(a.id, item.agentId));
-                const style = categoryStyles[item.category];
+                const style = bucketOf(item);
                 const isNew = index < unseen;
                 return (
                   <div key={item.id} className={`flex items-start gap-3 border-b border-[#f0f4f8] px-4 py-3 last:border-0 ${isNew ? 'bg-[#f8fbff]' : ''}`}>
                     <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${style.bg} ${style.text}`}><Receipt size={15} /></div>
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-semibold">{agent?.name ?? t('agent')}</div>
-                      <div className="mt-0.5 text-xs text-[#627d98]">{t('newCollection')} · {item.category}</div>
+                      <div className="mt-0.5 text-xs text-[#627d98]">{t('newCollection')} · {collectionLabel(item, lang)}</div>
                       <div className="mt-0.5 text-xs text-[#829ab1]">{formatDayLabel(item.date)} · {etb(item.amount)}</div>
                     </div>
                     {isNew && <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#e4b44c]" />}
@@ -743,14 +745,10 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
   const monthTotal = collections.filter((item) => item.date.startsWith(currentMonth)).reduce((sum, item) => sum + item.amount, 0);
   const yearTotal = collections.filter((item) => item.date.startsWith(currentYear)).reduce((sum, item) => sum + item.amount, 0);
   const allTimeTotal = collections.reduce((sum, item) => sum + item.amount, 0);
-  const catLabels: Record<string, string> = {
-    'Chat': lang === 'am' ? 'ጫት' : 'Chat',
-    'Royalty': lang === 'am' ? 'ሮያሊቲ' : 'Royalty',
-    'Other Revenue': lang === 'am' ? 'ሌላ' : 'Other',
-  };
-  const categoryData = categories.map((category) => ({
-    name: catLabels[category],
-    value: collections.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0),
+  const categoryData = bucketTotals(collections).map(({ bucket, amount }) => ({
+    name: lang === 'am' ? bucket.am : bucket.en,
+    value: amount,
+    hex: bucket.hex,
   }));
   const chartData = agents.map((agent) => ({
     id: agent.id,
@@ -815,7 +813,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={categoryData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={86} paddingAngle={4}>
-                  <Cell fill="#2cb67d" /><Cell fill="#2d7dd2" /><Cell fill="#e4b44c" />
+                  {categoryData.map((item) => <Cell key={item.name} fill={item.hex} />)}
                 </Pie>
                 <Tooltip formatter={(v) => etb(Number(v))} contentStyle={{ border: '1px solid #d9e2ec', borderRadius: 12, fontSize: 12 }} />
               </PieChart>
@@ -826,10 +824,10 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
             </div>
           </div>
           <div className="space-y-3">
-            {categoryData.map((item, index) => (
+            {categoryData.map((item) => (
               <div key={item.name} className="flex items-center justify-between text-sm">
                 <span className="flex items-center gap-2 text-[#627d98]">
-                  <span className={`h-2.5 w-2.5 rounded-full ${index === 0 ? 'bg-[#2cb67d]' : index === 1 ? 'bg-[#2d7dd2]' : 'bg-[#e4b44c]'}`} />
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.hex }} />
                   {item.name}
                 </span>
                 <span className="font-semibold">{etb(item.value)}</span>
@@ -860,11 +858,11 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
               {collections.length === 0 && (<tr><td colSpan={4} className="py-12 text-center text-sm text-[#829ab1]">{t('noCollectionsYet')}</td></tr>)}
               {collections.slice().reverse().slice(0, 5).map((item) => {
                 const agent = agents.find((a) => sameAgentId(a.id, item.agentId));
-                const style = categoryStyles[item.category];
+                const style = bucketOf(item);
                 return (
                   <tr key={item.id} className="border-b border-[#f0f4f8] last:border-0">
                     <td className="py-3.5 font-semibold">{agent?.name}</td>
-                    <td className="py-3.5"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${style.bg} ${style.text}`}>{item.category}</span></td>
+                    <td className="py-3.5"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${style.bg} ${style.text}`}>{collectionLabel(item, lang)}</span></td>
                     <td className="py-3.5 text-[#627d98]">{item.receipt}</td>
                     <td className="py-3.5 text-right font-bold">{etb(item.amount)}</td>
                   </tr>
@@ -1382,6 +1380,39 @@ function downloadAllAgentsExcel(
   const totalOther = reportRows.reduce((sum, row) => sum + row.other, 0);
   const grandTotal = totalChat + totalRoyalty + totalOther;
 
+  // Royalty split: Forest vs Sand (old records without a type go to "Not specified")
+  const royaltyOf = (agent: Agent, type: 'forest' | 'sand' | 'unspecified') =>
+    filtered
+      .filter(
+        (row) =>
+          sameAgentId(row.agentId, agent.id) &&
+          normalizeCategory(row.category) === 'Royalty' &&
+          (type === 'unspecified' ? !row.royaltyType : row.royaltyType === type),
+      )
+      .reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+
+  const royaltyRows = agents.map((agent) => {
+    const forest = royaltyOf(agent, 'forest');
+    const sand = royaltyOf(agent, 'sand');
+    const unspecified = royaltyOf(agent, 'unspecified');
+    return { name: agent.name, forest, sand, unspecified, total: forest + sand + unspecified };
+  });
+  const showUnspecified = royaltyRows.some((row) => row.unspecified > 0);
+  const royaltyBody = royaltyRows
+    .map(
+      (row) => `
+      <tr>
+        <td class="agent">${escapeCell(row.name)}</td>
+        <td class="number">${money(row.forest)}</td>
+        <td class="number">${money(row.sand)}</td>
+        ${showUnspecified ? `<td class="number">${money(row.unspecified)}</td>` : ''}
+        <td class="number">${money(row.total)}</td>
+      </tr>`,
+    )
+    .join('');
+  const royaltySum = (key: 'forest' | 'sand' | 'unspecified' | 'total') =>
+    money(royaltyRows.reduce((sum, row) => sum + row[key], 0));
+
  
   const html = `
     <html>
@@ -1545,6 +1576,29 @@ function downloadAllAgentsExcel(
             </tr>
           </tbody>
         </table>
+
+        <div class="subtitle" style="margin-top:28px">Royalty Breakdown: Forest vs Sand</div>
+        <table style="min-width:520px; width:auto;">
+          <thead>
+            <tr>
+              <th>Name of Agents</th>
+              <th>Forest Royalty</th>
+              <th>Sand Royalty</th>
+              ${showUnspecified ? '<th>Royalty (not specified)</th>' : ''}
+              <th>Total Royalty</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${royaltyBody || '<tr><td colspan="5">No agents found.</td></tr>'}
+            <tr class="total">
+              <td>TOTAL</td>
+              <td class="number">${royaltySum('forest')}</td>
+              <td class="number">${royaltySum('sand')}</td>
+              ${showUnspecified ? `<td class="number">${royaltySum('unspecified')}</td>` : ''}
+              <td class="number">${royaltySum('total')}</td>
+            </tr>
+          </tbody>
+        </table>
       </body>
     </html>
   `;
@@ -1569,7 +1623,7 @@ function downloadAllAgentsExcel(
 type ReportDuration = 'daily' | 'monthly';
 
 function Reports({ agents, collections }: { agents: Agent[]; collections: Collection[] }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [agentId, setAgentId] = useState(agents[0]?.id || '');
   const [mode, setMode] = useState<ReportDuration>('monthly');
   const [day, setDay] = useState(isoToday);
@@ -1625,9 +1679,10 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
   const targetValue = mode === 'daily' ? (agent?.daily || 0) : (agent?.monthly || 0);
   const targetLabel = mode === 'daily' ? t('dailyTargetLabel') : t('monthlyTarget');
   
-  const breakdown = categories.map((category) => ({
-    category,
-    amount: rows.filter((r) => r.category === category).reduce((s, r) => s + (Number(r.amount) || 0), 0),
+  const breakdown = bucketTotals(rows).map(({ bucket, amount }) => ({
+    key: bucket.key,
+    label: lang === 'am' ? bucket.am : bucket.en,
+    amount,
   }));
 
   const canExport = rangeStart <= rangeEnd;
@@ -1704,8 +1759,8 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
             <table className="w-full text-sm">
               <tbody>
                 {breakdown.map((row) => (
-                  <tr key={row.category} className="border-b border-[#e9eff5]">
-                    <td className="py-3 text-[#627d98]">{row.category}</td>
+                  <tr key={row.key} className="border-b border-[#e9eff5]">
+                    <td className="py-3 text-[#627d98]">{row.label}</td>
                     <td className="py-3 text-right font-semibold">{etb(row.amount)}</td>
                   </tr>
                 ))}
@@ -1731,7 +1786,7 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
                   {rows.map((row) => (
                     <tr key={row.id} className="border-t border-[#e9eff5]">
                       <td className="py-2.5">{formatDayLabel(row.date)}</td>
-                      <td className="py-2.5 text-[#627d98]">{row.category}</td>
+                      <td className="py-2.5 text-[#627d98]">{collectionLabel(row, lang)}</td>
                       <td className="py-2.5 text-[#627d98]">{row.receipt}</td>
                       <td className="py-2.5 text-right font-semibold">{etb(row.amount)}</td>
                     </tr>

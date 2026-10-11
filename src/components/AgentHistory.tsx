@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { CalendarDays, ClipboardList, Filter, Receipt, Search } from 'lucide-react';
-import { Agent, Category, Collection, categories, categoryStyles, etb, etbShort, formatDate, formatDayLabel, isoToday, currentMonth } from '@/types';
+import { Agent, BucketKey, Collection, bucketKeyOf, bucketOf, collectionLabel, etb, etbShort, formatDate, formatDayLabel, isoToday, currentMonth, revenueBuckets } from '@/types';
 import { useLang } from '@/i18n';
 
 type Props = {
@@ -8,10 +8,10 @@ type Props = {
   collections: Collection[];
 };
 
-type FilterChip = 'All' | Category;
+type FilterChip = 'All' | BucketKey;
 
 export function AgentHistory({ agent, collections }: Props) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [filter, setFilter] = useState<FilterChip>('All');
   const [search, setSearch] = useState('');
 
@@ -19,7 +19,7 @@ export function AgentHistory({ agent, collections }: Props) {
 
   const filtered = useMemo(() => {
     let result = allMine;
-    if (filter !== 'All') result = result.filter(c => c.category === filter);
+    if (filter !== 'All') result = result.filter(c => bucketKeyOf(c) === filter);
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter(c => c.receipt.toLowerCase().includes(q) || c.notes.toLowerCase().includes(q));
@@ -40,7 +40,8 @@ export function AgentHistory({ agent, collections }: Props) {
   const todayTotal = allMine.filter(c => c.date === isoToday).reduce((s, c) => s + c.amount, 0);
   const todayCount = allMine.filter(c => c.date === isoToday).length;
 
-  const chips: FilterChip[] = ['All', ...categories];
+  const hasUnspecified = allMine.some(c => bucketKeyOf(c) === 'royalty_unspecified');
+  const chips: FilterChip[] = ['All', ...revenueBuckets.filter(b => b.key !== 'royalty_unspecified' || hasUnspecified).map(b => b.key)];
 
   return (
     <div className="space-y-6">
@@ -89,10 +90,10 @@ export function AgentHistory({ agent, collections }: Props) {
           <div className="flex flex-wrap gap-2">
             {chips.map(chip => {
               const active = filter === chip;
-              const style = chip !== 'All' ? categoryStyles[chip] : null;
+              const style = chip !== 'All' ? revenueBuckets.find(b => b.key === chip) ?? null : null;
               return (
                 <button key={chip} onClick={() => setFilter(chip)} className={`rounded-full px-3.5 py-2 text-xs font-bold transition ${active ? style ? `${style.solid} text-white` : 'bg-[#102a43] text-white' : style ? `${style.bg} ${style.text} hover:opacity-80` : 'bg-[#f0f4f8] text-[#627d98] hover:bg-[#e9eff5]'}`}>
-                  {chip}
+                  {style ? (lang === 'am' ? style.am : style.en) : chip}
                 </button>
               );
             })}
@@ -122,7 +123,7 @@ export function AgentHistory({ agent, collections }: Props) {
               </div>
               <div className="space-y-3">
                 {items.map(item => {
-                  const style = categoryStyles[item.category];
+                  const style = bucketOf(item);
                   return (
                     <div key={item.id} className="flex items-center justify-between rounded-xl border border-[#e9eff5] bg-white p-4 shadow-sm transition hover:shadow-md">
                       <div className="flex items-center gap-3">
@@ -131,7 +132,7 @@ export function AgentHistory({ agent, collections }: Props) {
                         </div>
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-[#102a43]">{item.category}</span>
+                            <span className="text-sm font-bold text-[#102a43]">{collectionLabel(item, lang)}</span>
                             <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${style.bg} ${style.text}`}>{item.receipt}</span>
                           </div>
                           {item.notes && <div className="mt-1 text-xs text-[#829ab1]">{item.notes}</div>}

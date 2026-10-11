@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { Check, ChevronDown, FileText, Hash, MessageSquare, Plus, Receipt } from 'lucide-react';
-import { Agent, Category, Collection, categories, categoryStyles, etb, isoToday, normalizeCategory } from '@/types';
+import { Agent, Category, Collection, RoyaltyType, categories, categoryStyles, etb, isoToday, normalizeCategory, normalizeRoyaltyType, revenueBuckets, royaltyTypes } from '@/types';
 import { useLang } from '@/i18n';
 import { supabase } from '@/supabase';
 
@@ -15,6 +15,7 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
   const { t, lang } = useLang();
   const [submitting, setSubmitting] = useState(false);
   const [category, setCategory] = useState<Category>('Chat');
+  const [royaltyType, setRoyaltyType] = useState<RoyaltyType | null>(null);
   const [amount, setAmount] = useState('');
   const [receipt, setReceipt] = useState('');
   const [notes, setNotes] = useState('');
@@ -31,6 +32,9 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
     const e: Record<string, string> = {};
     if (!parsedAmount || parsedAmount <= 0) e.amount = t('enterValidAmount');
     if (!receipt.trim()) e.receipt = t('receiptRequired');
+    if (category === 'Royalty' && !royaltyType) {
+      e.royaltyType = lang === 'am' ? 'የሮያሊቲ ዓይነት ይምረጡ (ደን ወይም አሸዋ)።' : 'Please choose the royalty type (Forest or Sand).';
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   };
@@ -54,6 +58,7 @@ const submit = async (event: FormEvent) => {
       .insert({
         agent_id: agent.id,
         category,
+        royalty_type: category === 'Royalty' ? royaltyType : null,
         amount: parsedAmount,
         receipt_number: receipt.trim(),
         notes: notes.trim(),
@@ -80,6 +85,7 @@ const submit = async (event: FormEvent) => {
               id: String(data.id),
               agentId: agent.id,
               category: normalizeCategory(data.category),
+              royaltyType: normalizeCategory(data.category) === 'Royalty' ? normalizeRoyaltyType(data.royalty_type) : null,
               amount: Number(data.amount),
               receipt: data.receipt_number ?? '',
               notes: data.notes ?? '',
@@ -88,7 +94,8 @@ const submit = async (event: FormEvent) => {
           ],
     );
 
-    setLastAmount(etb(parsedAmount));
+    const royaltyBucket = category === 'Royalty' ? revenueBuckets.find((b) => b.key === royaltyType) : undefined;
+    setLastAmount(royaltyBucket ? `${etb(parsedAmount)} (${lang === 'am' ? royaltyBucket.am : royaltyBucket.en})` : etb(parsedAmount));
     setAmount('');
     setReceipt('');
     setNotes('');
@@ -164,6 +171,33 @@ const submit = async (event: FormEvent) => {
               );
             })}
           </div>
+
+          {category === 'Royalty' && (
+            <div className="mt-4 animate-fade-in">
+              <span className="mb-2 block text-sm font-semibold text-[#334e68]">
+                {lang === 'am' ? 'የሮያሊቲ ዓይነት' : 'Royalty type'} <span className="text-[#c0392b]">*</span>
+              </span>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {royaltyTypes.map((type) => {
+                  const bucket = revenueBuckets.find((b) => b.key === type)!;
+                  const selected = royaltyType === type;
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => setRoyaltyType(type)}
+                      className={`flex items-center gap-3 rounded-xl border-2 p-3.5 text-left transition ${selected ? `${bucket.bg} border-current ${bucket.text}` : 'border-[#e9eff5] hover:border-[#d9e2ec]'}`}
+                    >
+                      <span className={`h-3 w-3 shrink-0 rounded-full ${bucket.solid}`} />
+                      <span className={`text-sm font-bold ${selected ? bucket.text : 'text-[#102a43]'}`}>{lang === 'am' ? bucket.am : bucket.en}</span>
+                      {selected && <Check size={18} className={`ml-auto ${bucket.text}`} />}
+                    </button>
+                  );
+                })}
+              </div>
+              {errors.royaltyType && <p className="mt-1.5 text-xs text-[#c0392b]">{errors.royaltyType}</p>}
+            </div>
+          )}
         </div>
 
         <div className="grid gap-5 sm:grid-cols-2">
