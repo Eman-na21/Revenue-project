@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { CalendarDays, ClipboardList, Filter, Receipt, Search } from 'lucide-react';
 import { Agent, BucketKey, Collection, bucketKeyOf, bucketOf, collectionLabel, etb, etbShort, formatDate, formatDayLabel, isoToday, currentMonth, revenueBuckets } from '@/types';
 import { useLang } from '@/i18n';
+import { AgentReport } from '@/components/AgentReport';
 
 type Props = {
   agent: Agent;
@@ -77,6 +78,8 @@ export function AgentHistory({ agent, collections }: Props) {
           <p className="mt-1 text-xs text-[#829ab1]">{etbShort(allMine.reduce((s, c) => s + c.amount, 0))} {t('allTime')}</p>
         </div>
       </div>
+
+      <AgentReport />
 
       <div className="rounded-2xl border border-[#d9e2ec] bg-white p-4 shadow-sm">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
