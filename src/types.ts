@@ -1,6 +1,6 @@
 export type Role = 'admin' | 'agent';
 export type Category = 'Chat' | 'Royalty' | 'Other Revenue';
-export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings';
+export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings' | 'corrections';
 
 export type Agent = {
   id: string; // = Supabase profile / auth user UUID
@@ -23,6 +23,8 @@ export type Collection = {
   royaltyType: RoyaltyType | null;
   amount: number;
   receipt: string;
+  /** Receipt photos in private storage (empty for older records). */
+  receiptPaths: string[];
   notes: string;
   date: string;
 };
@@ -55,6 +57,12 @@ export const categoryStyles: Record<Category, { bg: string; text: string; solid:
   'Royalty': { bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]', light: 'bg-[#eaf2fb]' },
   'Other Revenue': { bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]', light: 'bg-[#fff5dc]' },
 };
+
+/** true = an agent cannot submit a collection without a receipt photo. Set to false to make the photo optional. */
+export const RECEIPT_PHOTO_REQUIRED = true;
+
+/** Most photos one collection can have (the database enforces the same number). */
+export const MAX_RECEIPT_PHOTOS = 30;
 
 export const royaltyTypes: RoyaltyType[] = ['forest', 'sand'];
 

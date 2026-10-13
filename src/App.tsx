@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { BarChart3, Bell, CalendarDays, Check, ClipboardList, Download, FileText, Globe, Home, KeyRound, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, UserRound, Users, X } from 'lucide-react';
+import { BarChart3, Bell, CalendarDays, Camera, Check, ClipboardCheck, ClipboardList, Download, FileText, Globe, Home, KeyRound, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, UserRound, Users, X } from 'lucide-react';
 import {
   Agent, Category, Collection, Recommendation, Session, Tab, compact, etb,
   formatDayLabel, isoToday, todayISO, currentDateLabel, currentMonth, currentYear, fiscalYearLabel,
@@ -16,6 +16,10 @@ import { AgentHistory } from '@/components/AgentHistory';
 import { AdminRecommendations } from '@/components/AdminRecommendations';
 import { supabase } from '@/supabase';
 import { toEmail } from '@/auth';
+import { AdminCorrections } from '@/components/AdminCorrections';
+import { CORRECTION_COLUMNS, CorrectionRequest, CorrectionRow, NewCorrectionInput, rowToCorrection } from '@/corrections';
+import { countReceiptPhotos, downloadReceiptsZip, receiptsInRange } from '@/receipts';
+import { ReceiptButton } from '@/components/ReceiptViewer';
 
 /* ---------- Shared normalization helpers ---------- */
 
@@ -45,6 +49,8 @@ type CollectionRow = {
   agent_id: string;
   category: unknown;
   royalty_type?: string | null;
+  receipt_path?: string | null;
+  receipt_paths?: string[] | null;
   amount: unknown;
   receipt_number: string | null;
   notes: string | null;
@@ -60,7 +66,7 @@ type RecommendationRow = {
 };
 
 const PROFILE_COLUMNS = 'id, username, full_name, role, active, daily_target';
-const COLLECTION_COLUMNS = 'id, agent_id, category, royalty_type, amount, receipt_number, notes, collected_at, created_at';
+const COLLECTION_COLUMNS = 'id, agent_id, category, royalty_type, receipt_path, receipt_paths, amount, receipt_number, notes, collected_at, created_at';
 const RECOMMENDATION_COLUMNS = 'id, agent_id, message, created_at';
 
 function profileToAgent(profile: ProfileRow): Agent {
@@ -88,6 +94,8 @@ function rowToCollection(item: CollectionRow): Collection {
     royaltyType: normalizeCategory(item.category) === 'Royalty' ? normalizeRoyaltyType(item.royalty_type) : null,
     amount: Number(item.amount) || 0,
     receipt: item.receipt_number ?? '',
+    // receipt_paths is the list; receipt_path is the old single-photo column (kept as a fallback)
+    receiptPaths: item.receipt_paths?.length ? item.receipt_paths : item.receipt_path ? [item.receipt_path] : [],
     notes: item.notes ?? '',
     date: String(rawDate).trim().split('T')[0],
   };
@@ -169,6 +177,7 @@ function AppInner() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [corrections, setCorrections] = useState<CorrectionRequest[]>([]);
 
   /* 1. Restore the saved Supabase sign-in when the app opens */
   useEffect(() => {
@@ -210,6 +219,7 @@ function AppInner() {
       setAgents([]);
       setCollections([]);
       setRecommendations([]);
+      setCorrections([]);
       setDataReady(false);
       return;
     }
@@ -231,11 +241,23 @@ function AppInner() {
 
         if (profilesResult.error) throw profilesResult.error;
         if (recommendationsResult.error) throw recommendationsResult.error;
+
+        // Correction requests: if this table does not exist yet, the rest of the app still works.
+        let correctionRows: CorrectionRow[] = [];
+        try {
+          const correctionsResult = await sb.from('correction_requests').select(CORRECTION_COLUMNS).order('created_at', { ascending: false });
+          if (correctionsResult.error) console.warn('Correction requests are not available:', correctionsResult.error.message);
+          else correctionRows = (correctionsResult.data ?? []) as unknown as CorrectionRow[];
+        } catch (err) {
+          console.warn('Correction requests are not available:', err);
+        }
+
         if (cancelled) return;
 
         setAgents(((profilesResult.data ?? []) as ProfileRow[]).map(profileToAgent));
         setCollections(collectionRows.map(rowToCollection));
         setRecommendations(((recommendationsResult.data ?? []) as RecommendationRow[]).map(rowToRecommendation));
+        setCorrections(correctionRows.map(rowToCorrection));
         setDataReady(true);
       } catch (err) {
         console.error('Data load error:', err);
@@ -259,9 +281,38 @@ function AppInner() {
         const row = rowToCollection(payload.new as CollectionRow);
         setCollections((current) => (current.some((item) => item.id === row.id) ? current : [...current, row]));
       })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'collections' }, (payload) => {
+        const row = rowToCollection(payload.new as CollectionRow);
+        setCollections((current) => current.map((item) => (item.id === row.id ? row : item)));
+      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'recommendations' }, (payload) => {
         const row = rowToRecommendation(payload.new as RecommendationRow);
         setRecommendations((current) => (current.some((item) => item.id === row.id) ? current : [row, ...current]));
+      })
+      .subscribe();
+
+    return () => {
+      void sb.removeChannel(channel);
+    };
+  }, [session]);
+
+  /* 3b. Live updates for correction requests (own channel, so a missing table can never disturb the other updates) */
+  useEffect(() => {
+    const sb = supabase;
+    if (!session || !sb) return;
+
+    const upsert = (row: CorrectionRequest) =>
+      setCorrections((current) =>
+        current.some((item) => item.id === row.id) ? current.map((item) => (item.id === row.id ? row : item)) : [row, ...current],
+      );
+
+    const channel = sb
+      .channel('live-corrections')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'correction_requests' }, (payload) => {
+        upsert(rowToCorrection(payload.new as CorrectionRow));
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'correction_requests' }, (payload) => {
+        upsert(rowToCorrection(payload.new as CorrectionRow));
       })
       .subscribe();
 
@@ -311,6 +362,51 @@ function AppInner() {
     setRecommendations((current) => (current.some((item) => item.id === saved.id) ? current : [saved, ...current]));
   };
 
+  /** An agent asks for a correction. The database fills in the old values and who he is. Throws on failure. */
+  const handleSubmitCorrection = async (input: NewCorrectionInput) => {
+    if (!supabase) throw new Error('Database connection is not configured.');
+    const { data, error } = await supabase
+      .from('correction_requests')
+      .insert({
+        collection_id: input.collectionId,
+        new_category: input.category,
+        new_royalty_type: input.category === 'Royalty' ? input.royaltyType : null,
+        new_amount: input.amount,
+        new_receipt_number: input.receipt,
+        new_notes: input.notes,
+        reason: input.reason,
+      })
+      .select(CORRECTION_COLUMNS)
+      .single();
+    if (error) throw error;
+    const saved = rowToCorrection(data as unknown as CorrectionRow);
+    setCorrections((current) => (current.some((item) => item.id === saved.id) ? current : [saved, ...current]));
+  };
+
+  /** The administrator approves (the wrong values are replaced) or rejects a request. Throws on failure. */
+  const handleDecideCorrection = async (id: string, decision: 'approve' | 'reject', note: string) => {
+    if (!supabase) throw new Error('Database connection is not configured.');
+    const { error } = await supabase.rpc(decision === 'approve' ? 'approve_correction' : 'reject_correction', {
+      p_request: id,
+      p_note: note || null,
+    });
+    if (error) throw error;
+
+    const { data } = await supabase.from('correction_requests').select(CORRECTION_COLUMNS).eq('id', id).single();
+    if (!data) return;
+    const updated = rowToCorrection(data as unknown as CorrectionRow);
+    setCorrections((current) => current.map((item) => (item.id === id ? updated : item)));
+    if (decision === 'approve') {
+      setCollections((current) =>
+        current.map((item) =>
+          item.id === updated.collectionId
+            ? { ...item, category: updated.newCategory, royaltyType: updated.newRoyaltyType, amount: updated.newAmount, receipt: updated.newReceipt, notes: updated.newNotes }
+            : item,
+        ),
+      );
+    }
+  };
+
   if (booting) return <Splash />;
 
   if (!supabase) {
@@ -354,6 +450,9 @@ function AppInner() {
       setCollections={setCollections}
       recommendations={recommendations}
       onSaveRecommendation={handleSaveRecommendation}
+      corrections={corrections}
+      onSubmitCorrection={handleSubmitCorrection}
+      onDecideCorrection={handleDecideCorrection}
       onLogout={handleLogout}
     />
   );
@@ -516,6 +615,9 @@ type ShellProps = {
   setCollections: (next: Collection[] | ((current: Collection[]) => Collection[])) => void;
   recommendations: Recommendation[];
   onSaveRecommendation: (recommendation: Recommendation) => Promise<void>;
+  corrections: CorrectionRequest[];
+  onSubmitCorrection: (input: NewCorrectionInput) => Promise<void>;
+  onDecideCorrection: (id: string, decision: 'approve' | 'reject', note: string) => Promise<void>;
   onLogout: () => void;
 };
 
@@ -575,17 +677,19 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
   );
 }
 
-function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, onLogout }: ShellProps) {
-  const { t } = useLang();
+function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, corrections, onSubmitCorrection, onDecideCorrection, onLogout }: ShellProps) {
+  const { t, lang } = useLang();
   const [tab, setTab] = useState<Tab>(session.role === 'admin' ? 'overview' : 'entry');
   const [mobileOpen, setMobileOpen] = useState(false);
   const isAdmin = session.role === 'admin';
+  const pendingCount = corrections.filter((request) => request.status === 'pending').length;
 
   const adminNav: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
     { id: 'overview', label: t('overview'), icon: BarChart3 },
     { id: 'agents', label: t('fieldAgents'), icon: Users },
     { id: 'reports', label: t('monthlyReports'), icon: FileText },
     { id: 'recommendations', label: t('recommendations'), icon: MessageSquareText },
+    { id: 'corrections', label: lang === 'am' ? 'የእርማት ጥያቄዎች' : 'Corrections', icon: ClipboardCheck },
     { id: 'settings', label: t('settings'), icon: Settings },
   ];
   const agentNav: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
@@ -619,6 +723,9 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
               return (
                 <button key={item.id} onClick={() => go(item.id)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium transition ${tab === item.id ? 'bg-white/12 text-white' : 'text-[#bcccdc] hover:bg-white/6 hover:text-white'}`}>
                   <Icon size={18} /> {item.label}
+                  {item.id === 'corrections' && pendingCount > 0 && (
+                    <span className="ml-auto rounded-full bg-[#e4b44c] px-2 py-0.5 text-[11px] font-bold text-[#102a43]">{pendingCount}</span>
+                  )}
                 </button>
               );
             })}
@@ -665,11 +772,26 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
         </header>
 
         <main className="mx-auto max-w-[1100px] p-5 pb-28 sm:p-8 lg:pb-8">
+          {isAdmin && pendingCount > 0 && tab !== 'corrections' && (
+            <button
+              onClick={() => go('corrections')}
+              className="mb-6 flex w-full items-center justify-between gap-3 rounded-2xl border border-[#e4b44c]/50 bg-[#fff9e8] px-5 py-4 text-left text-sm font-bold text-[#8b650b] transition hover:bg-[#fff3d1]"
+            >
+              <span>
+                {lang === 'am'
+                  ? `${pendingCount} የእርማት ጥያቄ ማጽደቅዎን እየጠበቀ ነው`
+                  : `${pendingCount} correction request${pendingCount === 1 ? ' is' : 's are'} waiting for your approval`}
+              </span>
+              <span aria-hidden="true">→</span>
+            </button>
+          )}
           {isAdmin ? (
             tab === 'overview' ? (
               <AdminOverview agents={agents} collections={collections} onNavigate={go} />
             ) : tab === 'agents' ? (
               <AgentManagement agents={agents} setAgents={setAgents} collections={collections} />
+            ) : tab === 'corrections' ? (
+              <AdminCorrections agents={agents} collections={collections} corrections={corrections} onDecide={onDecideCorrection} />
             ) : tab === 'recommendations' ? (
               <AdminRecommendations agents={agents} collections={collections} recommendations={recommendations} onSave={onSaveRecommendation} />
             ) : tab === 'settings' ? (
@@ -684,7 +806,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
           ) : tab === 'settings' ? (
             <AgentSettings agent={currentAgent} onLogout={onLogout} />
           ) : (
-            <AgentHistory agent={currentAgent} collections={collections} />
+            <AgentHistory agent={currentAgent} collections={collections} corrections={corrections.filter((request) => sameAgentId(request.agentId, currentAgent.id))} onSubmitCorrection={onSubmitCorrection} />
           )}
         </main>
       </div>
@@ -863,7 +985,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
                   <tr key={item.id} className="border-b border-[#f0f4f8] last:border-0">
                     <td className="py-3.5 font-semibold">{agent?.name}</td>
                     <td className="py-3.5"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${style.bg} ${style.text}`}>{collectionLabel(item, lang)}</span></td>
-                    <td className="py-3.5 text-[#627d98]">{item.receipt}</td>
+                    <td className="py-3.5 text-[#627d98]">{item.receipt}<ReceiptButton paths={item.receiptPaths} /></td>
                     <td className="py-3.5 text-right font-bold">{etb(item.amount)}</td>
                   </tr>
                 );
@@ -1630,6 +1752,8 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
   const [month, setMonth] = useState(currentMonth); // Format: "YYYY-MM"
   const [rangeStart, setRangeStart] = useState(`${currentMonth}-01`);
   const [rangeEnd, setRangeEnd] = useState(isoToday);
+  const [zipBusy, setZipBusy] = useState(false);
+  const [zipStatus, setZipStatus] = useState('');
 
   useEffect(() => {
     if (agents.length === 0) {
@@ -1686,6 +1810,27 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
   }));
 
   const canExport = rangeStart <= rangeEnd;
+  const tr = (en: string, am: string) => (lang === 'am' ? am : en);
+  const receiptCount = countReceiptPhotos(receiptsInRange(collections, rangeStart, rangeEnd));
+
+  const downloadReceipts = async () => {
+    if (zipBusy) return;
+    setZipBusy(true);
+    setZipStatus('');
+    try {
+      const result = await downloadReceiptsZip(agents, collections, rangeStart, rangeEnd, (done, totalCount) =>
+        setZipStatus(`${done} / ${totalCount}`),
+      );
+      setZipStatus(
+        result.failed > 0
+          ? tr(`Saved ${result.saved} photos. ${result.failed} could not be downloaded.`, `${result.saved} ፎቶዎች ተቀምጠዋል። ${result.failed} ማውረድ አልተቻለም።`)
+          : tr(`Done: ${result.saved} photos.`, `ተጠናቋል፦ ${result.saved} ፎቶዎች።`),
+      );
+    } catch {
+      setZipStatus(tr('Download failed. Please try again.', 'ማውረድ አልተሳካም። እንደገና ይሞክሩ።'));
+    }
+    setZipBusy(false);
+  };
 
   return (
     <>
@@ -1696,9 +1841,17 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
           <Field label={t('exportFromDate')}><input type="date" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} className="input" /></Field>
           <Field label={t('exportToDate')}><input type="date" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} className="input" /></Field>
         </div>
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <div className="flex flex-col gap-2 sm:flex-row">
         <button onClick={() => void downloadAllAgentsExcel(agents, collections, rangeStart, rangeEnd)} disabled={!canExport} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2cb67d] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#239b67] disabled:cursor-not-allowed disabled:opacity-50">
           <Download size={17} /> {t('exportToExcel')}
         </button>
+            <button onClick={() => void downloadReceipts()} disabled={!canExport || zipBusy || receiptCount === 0} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#102a43] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#173f61] disabled:cursor-not-allowed disabled:opacity-50">
+              <Camera size={17} /> {zipBusy ? tr('Preparing…', 'በማዘጋጀት ላይ…') : tr('Receipt photos (ZIP)', 'የደረሰኝ ፎቶዎች (ZIP)')} ({receiptCount})
+            </button>
+          </div>
+          {zipStatus && <p className="text-xs text-[#627d98]">{zipStatus}</p>}
+        </div>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[.65fr_1.35fr]">
@@ -1787,7 +1940,7 @@ function Reports({ agents, collections }: { agents: Agent[]; collections: Collec
                     <tr key={row.id} className="border-t border-[#e9eff5]">
                       <td className="py-2.5">{formatDayLabel(row.date)}</td>
                       <td className="py-2.5 text-[#627d98]">{collectionLabel(row, lang)}</td>
-                      <td className="py-2.5 text-[#627d98]">{row.receipt}</td>
+                      <td className="py-2.5 text-[#627d98]">{row.receipt}<ReceiptButton paths={row.receiptPaths} /></td>
                       <td className="py-2.5 text-right font-semibold">{etb(row.amount)}</td>
                     </tr>
                   ))}

@@ -1,8 +1,9 @@
-import { FormEvent, useState } from 'react';
-import { Check, ChevronDown, FileText, Hash, MessageSquare, Plus, Receipt } from 'lucide-react';
-import { Agent, Category, Collection, RoyaltyType, categories, categoryStyles, etb, isoToday, normalizeCategory, normalizeRoyaltyType, revenueBuckets, royaltyTypes } from '@/types';
+import { ChangeEvent, FormEvent, useRef, useState } from 'react';
+import { Camera, Check, ChevronDown, FileText, Hash, MessageSquare, Plus, Receipt, X } from 'lucide-react';
+import { Agent, Category, Collection, RoyaltyType, categories, categoryStyles, etb, isoToday, normalizeCategory, normalizeRoyaltyType, revenueBuckets, royaltyTypes, RECEIPT_PHOTO_REQUIRED, MAX_RECEIPT_PHOTOS } from '@/types';
 import { useLang } from '@/i18n';
 import { supabase } from '@/supabase';
+import { compressImage, uploadReceiptPhoto } from '@/receipts';
 
 type Props = {
   agent: Agent;
@@ -22,6 +23,45 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [success, setSuccess] = useState(false);
   const [lastAmount, setLastAmount] = useState('');
+  type PickedPhoto = { id: string; file: File; preview: string };
+  const [photos, setPhotos] = useState<PickedPhoto[]>([]);
+  const [uploadProgress, setUploadProgress] = useState('');
+  // Photos already uploaded in a failed attempt are remembered, so a retry does not upload them twice.
+  const uploadedRef = useRef(new Map<string, string>());
+
+  const clearPhotos = () => {
+    photos.forEach((item) => URL.revokeObjectURL(item.preview));
+    uploadedRef.current.clear();
+    setPhotos([]);
+  };
+
+  const removePhoto = (id: string) => {
+    setPhotos((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target) URL.revokeObjectURL(target.preview);
+      return current.filter((item) => item.id !== id);
+    });
+    uploadedRef.current.delete(id);
+  };
+
+  const onPhotosChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (files.length === 0) return;
+
+    const room = MAX_RECEIPT_PHOTOS - photos.length;
+    const accepted = files.slice(0, Math.max(0, room));
+    setPhotos((current) => [
+      ...current,
+      ...accepted.map((file) => ({ id: crypto.randomUUID(), file, preview: URL.createObjectURL(file) })),
+    ]);
+    setErrors((current) => ({
+      ...current,
+      photo: files.length > accepted.length
+        ? (lang === 'am' ? `ከ${MAX_RECEIPT_PHOTOS} ፎቶ በላይ ማያያዝ አይቻልም።` : `You can attach at most ${MAX_RECEIPT_PHOTOS} photos.`)
+        : '',
+    }));
+  };
 
   const collectedToday = collections.filter(c => c.agentId === agent.id && c.date === isoToday).reduce((s, c) => s + c.amount, 0);
   const parsedAmount = Number(amount) || 0;
@@ -32,6 +72,9 @@ export function AgentEntry({ agent, collections, setCollections, onDone }: Props
     const e: Record<string, string> = {};
     if (!parsedAmount || parsedAmount <= 0) e.amount = t('enterValidAmount');
     if (!receipt.trim()) e.receipt = t('receiptRequired');
+    if (RECEIPT_PHOTO_REQUIRED && photos.length === 0) {
+      e.photo = lang === 'am' ? 'ቢያንስ አንድ የደረሰኝ ፎቶ ያያይዙ።' : 'Please attach at least one receipt photo.';
+    }
     if (category === 'Royalty' && !royaltyType) {
       e.royaltyType = lang === 'am' ? 'የሮያሊቲ ዓይነት ይምረጡ (ደን ወይም አሸዋ)።' : 'Please choose the royalty type (Forest or Sand).';
     }
@@ -50,6 +93,35 @@ const submit = async (event: FormEvent) => {
 
     setSubmitting(true);
 
+    // 1. Shrink and upload every photo first. If any upload fails nothing is recorded.
+    const receiptPaths: string[] = [];
+    for (let i = 0; i < photos.length; i++) {
+      const item = photos[i];
+      setUploadProgress(lang === 'am' ? `ፎቶ በመላክ ላይ ${i + 1} / ${photos.length}` : `Uploading photo ${i + 1} / ${photos.length}`);
+      try {
+        let path = uploadedRef.current.get(item.id);
+        if (!path) {
+          const small = await compressImage(item.file);
+          path = await uploadReceiptPhoto(agent.id, small);
+          uploadedRef.current.set(item.id, path);
+        }
+        receiptPaths.push(path);
+      } catch (err) {
+        console.error('Receipt photo upload error:', err);
+        setUploadProgress('');
+        setSubmitting(false);
+        setErrors({
+          photo: lang === 'am'
+            ? `ፎቶ ${i + 1} መላክ አልተቻለም። ኢንተርኔትዎን ያረጋግጡና እንደገና ይሞክሩ (የተላኩት ፎቶዎች እንደገና አይላኩም)።`
+            : `Photo ${i + 1} could not be uploaded. Check your internet and try again (photos already sent will not be sent twice).`,
+        });
+        return;
+      }
+    }
+    setUploadProgress('');
+
+    // 2. Record the collection together with its photos
+
     // agent.id is the signed-in agent's own id. The database rule (RLS) accepts
     // a new row only when agent_id matches the logged-in user, so nobody can
     // record money on behalf of another agent.
@@ -61,6 +133,7 @@ const submit = async (event: FormEvent) => {
         royalty_type: category === 'Royalty' ? royaltyType : null,
         amount: parsedAmount,
         receipt_number: receipt.trim(),
+        receipt_paths: receiptPaths,
         notes: notes.trim(),
         collected_at: isoToday,
       })
@@ -88,6 +161,7 @@ const submit = async (event: FormEvent) => {
               royaltyType: normalizeCategory(data.category) === 'Royalty' ? normalizeRoyaltyType(data.royalty_type) : null,
               amount: Number(data.amount),
               receipt: data.receipt_number ?? '',
+              receiptPaths: Array.isArray(data.receipt_paths) ? (data.receipt_paths as string[]) : receiptPaths,
               notes: data.notes ?? '',
               date: data.collected_at ? String(data.collected_at).slice(0, 10) : isoToday,
             },
@@ -99,6 +173,7 @@ const submit = async (event: FormEvent) => {
     setAmount('');
     setReceipt('');
     setNotes('');
+    clearPhotos();
     setErrors({});
     setSuccess(true);
 
@@ -217,6 +292,48 @@ const submit = async (event: FormEvent) => {
             {errors.receipt && <p className="mt-1.5 text-xs text-[#c0392b]">{errors.receipt}</p>}
           </label>
         </div>
+
+        <div className="mt-5">
+          <span className="mb-2 flex items-center justify-between gap-1.5 text-sm font-semibold text-[#334e68]">
+            <span className="flex items-center gap-1.5">
+              <Camera size={14} className="text-[#829ab1]" /> {lang === 'am' ? 'የደረሰኝ ፎቶዎች' : 'Receipt photos'}
+              {RECEIPT_PHOTO_REQUIRED && <span className="text-[#c0392b]">*</span>}
+            </span>
+            <span className="text-xs font-normal text-[#829ab1]">{photos.length} / {MAX_RECEIPT_PHOTOS}</span>
+          </span>
+
+          {photos.length > 0 && (
+            <div className="mb-3 grid grid-cols-4 gap-2 sm:grid-cols-6">
+              {photos.map((item) => (
+                <div key={item.id} className="relative aspect-square overflow-hidden rounded-lg border border-[#d9e2ec] bg-[#f8fafc]">
+                  <img src={item.preview} alt="" className="h-full w-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={() => removePhoto(item.id)}
+                    disabled={submitting}
+                    className="absolute right-1 top-1 rounded-full bg-[#102a43]/75 p-1 text-white transition hover:bg-[#102a43] disabled:opacity-50"
+                    aria-label="Remove photo"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {photos.length < MAX_RECEIPT_PHOTOS && (
+            <label className="flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-[#d9e2ec] bg-[#f8fafc] px-4 py-5 text-center text-sm text-[#627d98] transition hover:border-[#2cb67d]">
+              <Camera size={22} className="text-[#2cb67d]" />
+              <span className="font-semibold">
+                {photos.length === 0
+                  ? (lang === 'am' ? 'ፎቶ ያንሱ ወይም ከጋለሪ ይምረጡ (ብዙ ፎቶ መምረጥ ይቻላል)' : 'Take photos or choose from gallery (you can pick many)')
+                  : (lang === 'am' ? '+ ተጨማሪ ፎቶ ያክሉ' : '+ Add more photos')}
+              </span>
+              <input type="file" accept="image/*" multiple onChange={onPhotosChange} className="hidden" />
+            </label>
+          )}
+          {errors.photo && <p className="mt-1.5 text-xs text-[#c0392b]">{errors.photo}</p>}
+        </div>
 {errors.submit && (
   <p className="mt-3 text-sm text-[#c0392b]">
     {errors.submit}
@@ -230,7 +347,7 @@ const submit = async (event: FormEvent) => {
         </label>
 
         <button type="submit" disabled={submitting} className="mt-7 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2cb67d] py-4 text-sm font-bold text-white shadow-lg shadow-[#2cb67d]/20 transition hover:bg-[#239b68] active:scale-[.99] disabled:opacity-70">
-          <Plus size={18} /> {t('submitCollection')}
+          <Plus size={18} /> {submitting ? (uploadProgress || (lang === 'am' ? 'በመላክ ላይ…' : 'Sending…')) : t('submitCollection')}
         </button>
       </form>
 

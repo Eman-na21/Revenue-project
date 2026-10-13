@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { ArrowUpRight, CalendarDays, ClipboardList, Clock, MessageSquareText, Receipt, Target, TrendingUp } from 'lucide-react';
-import { Agent, Collection, Recommendation, categories, categoryStyles, etb, etbShort, isoToday, currentMonth, formatDayLabel } from '@/types';
+import { Agent, Collection, Recommendation, bucketOf, bucketTotals, collectionLabel, etb, etbShort, isoToday, currentMonth, formatDayLabel } from '@/types';
 import { useLang } from '@/i18n';
 
 type Props = {
@@ -11,7 +11,7 @@ type Props = {
 };
 
 export function AgentHome({ agent, collections, recommendations, onNavigate }: Props) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const myCollections = useMemo(() => collections.filter(c => c.agentId === agent.id), [agent.id, collections]);
   const todayCollections = myCollections.filter(c => c.date === isoToday);
   const todayTotal = todayCollections.reduce((s, c) => s + c.amount, 0);
@@ -20,10 +20,7 @@ export function AgentHome({ agent, collections, recommendations, onNavigate }: P
   const remaining = Math.max(0, agent.daily - todayTotal);
   const recent = myCollections.slice().reverse().slice(0, 3);
 
-  const categoryTotals = categories.map(cat => ({
-    cat,
-    amount: todayCollections.filter(c => c.category === cat).reduce((s, c) => s + c.amount, 0),
-  }));
+  const categoryTotals = bucketTotals(todayCollections);
 
   return (
     <div className="space-y-6">
@@ -131,15 +128,15 @@ export function AgentHome({ agent, collections, recommendations, onNavigate }: P
         <h3 className="font-display font-bold text-[#102a43]">{t('todaysBreakdown')}</h3>
         <p className="mt-1 text-xs text-[#829ab1]">{t('collectionsByCategory')}</p>
         <div className="mt-5 space-y-4">
-          {categoryTotals.map(({ cat, amount }) => {
-            const style = categoryStyles[cat];
+          {categoryTotals.map(({ bucket, amount }) => {
+            const style = bucket;
             const catPercent = todayTotal > 0 ? Math.round((amount / todayTotal) * 100) : 0;
             return (
-              <div key={cat}>
+              <div key={bucket.key}>
                 <div className="flex items-center justify-between text-sm">
                   <span className="flex items-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${style.solid}`} />
-                    <span className="font-semibold text-[#334e68]">{cat}</span>
+                    <span className="font-semibold text-[#334e68]">{lang === 'am' ? bucket.am : bucket.en}</span>
                   </span>
                   <span className="font-bold text-[#102a43]">{etb(amount)}</span>
                 </div>
@@ -167,7 +164,7 @@ export function AgentHome({ agent, collections, recommendations, onNavigate }: P
             </div>
           )}
           {recent.map(item => {
-            const style = categoryStyles[item.category];
+            const style = bucketOf(item);
             return (
               <div key={item.id} className="flex items-center justify-between rounded-xl border border-[#e9eff5] p-3.5">
                 <div className="flex items-center gap-3">
@@ -175,7 +172,7 @@ export function AgentHome({ agent, collections, recommendations, onNavigate }: P
                     <Receipt size={18} />
                   </div>
                   <div>
-                    <div className="text-sm font-bold text-[#102a43]">{item.category}</div>
+                    <div className="text-sm font-bold text-[#102a43]">{collectionLabel(item, lang)}</div>
                     <div className="text-xs text-[#829ab1]">{formatDayLabel(item.date)} · {item.receipt}</div>
                   </div>
                 </div>

@@ -1,20 +1,26 @@
 import { useMemo, useState } from 'react';
-import { CalendarDays, ClipboardList, Filter, Receipt, Search } from 'lucide-react';
+import { CalendarDays, CheckCircle2, ClipboardList, Clock, Filter, Pencil, Receipt, Search, XCircle } from 'lucide-react';
 import { Agent, BucketKey, Collection, bucketKeyOf, bucketOf, collectionLabel, etb, etbShort, formatDate, formatDayLabel, isoToday, currentMonth, revenueBuckets } from '@/types';
 import { useLang } from '@/i18n';
 import { AgentReport } from '@/components/AgentReport';
+import { CorrectionModal } from '@/components/CorrectionModal';
+import { CorrectionRequest, NewCorrectionInput } from '@/corrections';
+import { ReceiptButton } from '@/components/ReceiptViewer';
 
 type Props = {
   agent: Agent;
   collections: Collection[];
+  corrections: CorrectionRequest[];
+  onSubmitCorrection: (input: NewCorrectionInput) => Promise<void>;
 };
 
 type FilterChip = 'All' | BucketKey;
 
-export function AgentHistory({ agent, collections }: Props) {
+export function AgentHistory({ agent, collections, corrections, onSubmitCorrection }: Props) {
   const { t, lang } = useLang();
   const [filter, setFilter] = useState<FilterChip>('All');
   const [search, setSearch] = useState('');
+  const [editing, setEditing] = useState<Collection | null>(null);
 
   const allMine = useMemo(() => collections.filter(c => c.agentId === agent.id), [agent.id, collections]);
 
@@ -127,21 +133,55 @@ export function AgentHistory({ agent, collections }: Props) {
               <div className="space-y-3">
                 {items.map(item => {
                   const style = bucketOf(item);
+                  const requests = corrections.filter(r => r.collectionId === item.id);
+                  const pendingRequest = requests.find(r => r.status === 'pending');
+                  const lastDecided = requests
+                    .filter(r => r.status !== 'pending')
+                    .sort((a, b) => (b.decidedAt ?? '').localeCompare(a.decidedAt ?? ''))[0];
                   return (
-                    <div key={item.id} className="flex items-center justify-between rounded-xl border border-[#e9eff5] bg-white p-4 shadow-sm transition hover:shadow-md">
-                      <div className="flex items-center gap-3">
-                        <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${style.bg} ${style.text}`}>
-                          <Receipt size={19} />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-[#102a43]">{collectionLabel(item, lang)}</span>
-                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${style.bg} ${style.text}`}>{item.receipt}</span>
+                    <div key={item.id} className="rounded-xl border border-[#e9eff5] bg-white p-4 shadow-sm transition hover:shadow-md">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${style.bg} ${style.text}`}>
+                            <Receipt size={19} />
                           </div>
-                          {item.notes && <div className="mt-1 text-xs text-[#829ab1]">{item.notes}</div>}
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-bold text-[#102a43]">{collectionLabel(item, lang)}</span>
+                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${style.bg} ${style.text}`}>{item.receipt}</span>
+                              <ReceiptButton paths={item.receiptPaths} />
+                            </div>
+                            {item.notes && <div className="mt-1 text-xs text-[#829ab1]">{item.notes}</div>}
+                          </div>
                         </div>
+                        <span className="font-display text-lg font-bold text-[#102a43]">{etb(item.amount)}</span>
                       </div>
-                      <span className="font-display text-lg font-bold text-[#102a43]">{etb(item.amount)}</span>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[#f0f4f8] pt-3 text-xs">
+                        {pendingRequest ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#fff5dc] px-2.5 py-1 font-bold text-[#a36b05]">
+                            <Clock size={12} /> {lang === 'am' ? 'እርማት ተጠይቋል፣ አስተዳዳሪው እየጠበቀ ነው' : 'Correction requested, waiting for the administrator'}
+                          </span>
+                        ) : lastDecided?.status === 'approved' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#e5f6ef] px-2.5 py-1 font-bold text-[#157a56]">
+                            <CheckCircle2 size={12} /> {lang === 'am' ? 'ተስተካክሏል' : 'Corrected'}
+                          </span>
+                        ) : lastDecided?.status === 'rejected' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#fff1f0] px-2.5 py-1 font-bold text-[#c0392b]">
+                            <XCircle size={12} /> {lang === 'am' ? 'እርማቱ ተቀባይነት አላገኘም' : 'Correction rejected'}{lastDecided.adminNote ? `: ${lastDecided.adminNote}` : ''}
+                          </span>
+                        ) : null}
+
+                        {!pendingRequest && (
+                          <button
+                            type="button"
+                            onClick={() => setEditing(item)}
+                            className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 font-bold text-[#2d7dd2] transition hover:bg-[#eaf2fb]"
+                          >
+                            <Pencil size={12} /> {lang === 'am' ? 'እርማት ጠይቅ' : 'Request correction'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -150,6 +190,8 @@ export function AgentHistory({ agent, collections }: Props) {
           );
         })}
       </div>
+
+      {editing && <CorrectionModal record={editing} onClose={() => setEditing(null)} onSubmit={onSubmitCorrection} />}
     </div>
   );
 }
