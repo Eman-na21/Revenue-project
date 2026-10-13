@@ -76,10 +76,7 @@ export function AdminCorrections({ agents, collections, corrections, onDecide }:
         <div className="text-xs font-bold uppercase tracking-[.18em] text-[#2cb67d]">{tr('Office control', 'የቢሮ ቁጥጥር')}</div>
         <h1 className="mt-2 font-display text-3xl font-bold tracking-tight text-[#102a43]">{tr('Correction requests', 'የእርማት ጥያቄዎች')}</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-[#627d98]">
-          {tr(
-            'Agents cannot edit a saved record. When they entered something wrong they ask here. Approving replaces the wrong values with the requested ones.',
-            'ወኪሎች የተቀመጠ መዝገብ መቀየር አይችሉም። የተሳሳተ ካስገቡ እዚህ ይጠይቃሉ። ሲያጸድቁት የተሳሳተው መረጃ በተጠየቀው ይተካል።',
-          )}
+        
         </p>
       </div>
 
