@@ -1,4 +1,4 @@
-export type Role = 'admin' | 'agent';
+export type Role = 'admin' | 'vice_admin' | 'agent';
 export type Category = 'Chat' | 'Royalty' | 'Other Revenue';
 export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings' | 'corrections';
 
@@ -59,7 +59,7 @@ export const categoryStyles: Record<Category, { bg: string; text: string; solid:
 };
 
 /** true = an agent cannot submit a collection without a receipt photo. Set to false to make the photo optional. */
-export const RECEIPT_PHOTO_REQUIRED = true;
+export const RECEIPT_PHOTO_REQUIRED = false;
 
 /** Most photos one collection can have (the database enforces the same number). */
 export const MAX_RECEIPT_PHOTOS = 30;

@@ -146,7 +146,9 @@ async function buildSession(userId: string): Promise<SessionResult> {
   return {
     session: profile.role === 'admin'
       ? { role: 'admin', name: agent.name }
-      : { role: 'agent', agentId: agent.id, name: agent.name },
+      : profile.role === 'vice_admin'
+        ? { role: 'vice_admin', name: agent.name }
+        : { role: 'agent', agentId: agent.id, name: agent.name },
   };
 }
 
@@ -229,8 +231,8 @@ function AppInner() {
 
     (async () => {
       try {
-        const profilesRequest = session.role === 'admin'
-          ? sb.from('profiles').select(PROFILE_COLUMNS).neq('role', 'admin').order('username')
+        const profilesRequest = session.role !== 'agent'
+          ? sb.from('profiles').select(PROFILE_COLUMNS).eq('role', 'agent').order('username')
           : sb.from('profiles').select(PROFILE_COLUMNS).eq('id', session.agentId ?? '');
 
         const [profilesResult, collectionRows, recommendationsResult] = await Promise.all([
@@ -679,9 +681,11 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
 
 function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, corrections, onSubmitCorrection, onDecideCorrection, onLogout }: ShellProps) {
   const { t, lang } = useLang();
-  const [tab, setTab] = useState<Tab>(session.role === 'admin' ? 'overview' : 'entry');
+  const [tab, setTab] = useState<Tab>(session.role !== 'agent' ? 'overview' : 'entry');
   const [mobileOpen, setMobileOpen] = useState(false);
-  const isAdmin = session.role === 'admin';
+  const isAdmin = session.role === 'admin'; // the main administrator
+  const isStaff = session.role !== 'agent'; // administrator or vice administrator
+  const roleLabel = isAdmin ? t('administrator') : isStaff ? (lang === 'am' ? 'ም/አስተዳዳሪ' : 'Vice administrator') : t('fieldAgent');
   const pendingCount = corrections.filter((request) => request.status === 'pending').length;
 
   const adminNav: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
@@ -698,8 +702,14 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
     { id: 'history', label: t('history'), icon: ClipboardList },
     { id: 'settings', label: t('settings'), icon: Settings },
   ];
-  const nav = isAdmin ? adminNav : agentNav;
-  const go = (next: Tab) => { setTab(next); setMobileOpen(false); };
+  // A vice administrator sees only these four pages (no agent management, no correction requests).
+  const viceAdminTabs: Tab[] = ['overview', 'reports', 'recommendations', 'settings'];
+  const nav = isAdmin ? adminNav : isStaff ? adminNav.filter((item) => viceAdminTabs.includes(item.id)) : agentNav;
+  const go = (next: Tab) => {
+    const allowed = isAdmin || !isStaff || viceAdminTabs.includes(next);
+    setTab(allowed ? next : 'overview');
+    setMobileOpen(false);
+  };
 
   const currentAgent = agents.find((a) => sameAgentId(a.id, session.agentId)) ?? agents[0];
 
@@ -738,7 +748,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold">{session.name}</div>
-              <div className="text-xs capitalize text-[#9fb3c8]">{isAdmin ? t('administrator') : t('fieldAgent')}</div>
+              <div className="text-xs capitalize text-[#9fb3c8]">{roleLabel}</div>
             </div>
             <LangToggle dark />
           </div>
@@ -757,16 +767,16 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             <div>
               <p className="text-xs font-semibold uppercase tracking-[.14em] text-[#829ab1]">{currentDateLabel}</p>
               <h2 className="font-display text-lg font-bold text-[#102a43]">
-                {isAdmin ? t('officeOverview') : `${t('goodMorning')}, ${session.name.split(' ')[0]}`}
+                {isStaff ? t('officeOverview') : `${t('goodMorning')}, ${session.name.split(' ')[0]}`}
               </h2>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <NotificationBell agents={agents} collections={collections} isAdmin={isAdmin} agentId={session.agentId} />
+            <NotificationBell agents={agents} collections={collections} isAdmin={isStaff} agentId={session.agentId} />
             <div className="hidden h-8 w-px bg-[#d9e2ec] sm:block" />
             <div className="hidden text-right sm:block">
               <div className="text-sm font-semibold">{session.name}</div>
-              <div className="text-xs text-[#829ab1]">{isAdmin ? t('administrator') : t('fieldAgent')}</div>
+              <div className="text-xs text-[#829ab1]">{roleLabel}</div>
             </div>
           </div>
         </header>
@@ -785,9 +795,9 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
               <span aria-hidden="true">→</span>
             </button>
           )}
-          {isAdmin ? (
+          {isStaff ? (
             tab === 'overview' ? (
-              <AdminOverview agents={agents} collections={collections} onNavigate={go} />
+              <AdminOverview agents={agents} collections={collections} onNavigate={go} canManageAgents={isAdmin} />
             ) : tab === 'agents' ? (
               <AgentManagement agents={agents} setAgents={setAgents} collections={collections} />
             ) : tab === 'corrections' ? (
@@ -795,7 +805,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             ) : tab === 'recommendations' ? (
               <AdminRecommendations agents={agents} collections={collections} recommendations={recommendations} onSave={onSaveRecommendation} />
             ) : tab === 'settings' ? (
-              <AdminSettings name={session.name} onLogout={onLogout} />
+              <AdminSettings name={session.name} onLogout={onLogout} isViceAdmin={!isAdmin} />
             ) : (
               <Reports agents={agents} collections={collections} />
             )
@@ -811,7 +821,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
         </main>
       </div>
 
-      {!isAdmin && (
+      {!isStaff && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-[#d9e2ec] bg-white/95 px-2 py-2 backdrop-blur lg:hidden">
           {agentNav.map((item) => {
             const Icon = item.icon;
@@ -861,7 +871,7 @@ function StatCard({ label, value, change, tone, icon }: { label: string; value: 
 
 /* ---------- Admin Overview ---------- */
 
-function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; collections: Collection[]; onNavigate: (tab: Tab) => void }) {
+function AdminOverview({ agents, collections, onNavigate, canManageAgents }: { agents: Agent[]; collections: Collection[]; onNavigate: (tab: Tab) => void; canManageAgents: boolean }) {
   const { t, lang } = useLang();
   const todayTotal = collections.filter((item) => item.date === isoToday).reduce((sum, item) => sum + item.amount, 0);
   const monthTotal = collections.filter((item) => item.date.startsWith(currentMonth)).reduce((sum, item) => sum + item.amount, 0);
@@ -896,7 +906,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
               <h3 className="font-display font-bold">{t('dailyAgentPerformance')}</h3>
               <p className="mt-1 text-xs text-[#829ab1]">{t('actualVsTarget')}</p>
             </div>
-            <button onClick={() => onNavigate('agents')} className="text-xs font-bold text-[#2d7dd2]">{t('viewAllAgents')}</button>
+            {canManageAgents && <button onClick={() => onNavigate('agents')} className="text-xs font-bold text-[#2d7dd2]">{t('viewAllAgents')}</button>}
           </div>
           <div className="mt-6 h-[280px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -964,7 +974,7 @@ function AdminOverview({ agents, collections, onNavigate }: { agents: Agent[]; c
             <h3 className="font-display font-bold">{t('recentCollectionActivity')}</h3>
             <p className="mt-1 text-xs text-[#829ab1]">{t('latestSubmissions')}</p>
           </div>
-          <button onClick={() => onNavigate('agents')} className="rounded-lg p-2 text-[#829ab1] hover:bg-[#f4f7fb]"><MoreHorizontal size={19} /></button>
+          {canManageAgents && <button onClick={() => onNavigate('agents')} className="rounded-lg p-2 text-[#829ab1] hover:bg-[#f4f7fb]"><MoreHorizontal size={19} /></button>}
         </div>
         <div className="mt-4 overflow-x-auto scrollbar">
           <table className="w-full min-w-[620px] text-left text-sm">
