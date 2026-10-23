@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { BarChart3, Bell, CalendarDays, Camera, Check, ClipboardCheck, ClipboardList, Download, FileText, Globe, Home, KeyRound, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, UserRound, Users, X } from 'lucide-react';
+import { BarChart3, Bell, Building2, CalendarDays, Camera, Check, ClipboardCheck, ClipboardList, Download, FileText, Globe, Home, KeyRound, LogOut, Menu, MessageSquareText, MoreHorizontal, Plus, Receipt, Search, Settings2, Settings, ShieldCheck, Target, UserRound, Users, X } from 'lucide-react';
 import {
   Agent, Category, Collection, Recommendation, Session, Tab, compact, etb,
   formatDayLabel, isoToday, todayISO, currentDateLabel, currentMonth, currentYear, fiscalYearLabel,
@@ -20,6 +20,12 @@ import { AdminCorrections } from '@/components/AdminCorrections';
 import { CORRECTION_COLUMNS, CorrectionRequest, CorrectionRow, NewCorrectionInput, rowToCorrection } from '@/corrections';
 import { countReceiptPhotos, downloadReceiptsZip, receiptsInRange } from '@/receipts';
 import { ReceiptButton } from '@/components/ReceiptViewer';
+import { AccountantHome } from '@/components/AccountantHome';
+import { AccountantEntry } from '@/components/AccountantEntry';
+import { AccountantHistory } from '@/components/AccountantHistory';
+import { AdminOffice } from '@/components/AdminOffice';
+import { OfficeBreakdown, OfficeKpiRow, OfficeTotalBanner, SourceHeading, agentSourceColor } from '@/components/OfficeOverview';
+import { CODE_COLUMNS, OfficeAccountant, OfficeRevenue, OfficeRevenueRow, RevenueCode, RevenueCodeRow, fetchAllOffice, officeTotals, rowToAccountant, rowToCode, rowToOffice } from '@/office';
 
 /* ---------- Shared normalization helpers ---------- */
 
@@ -135,7 +141,7 @@ async function fetchAllCollections(sb: SupabaseClient): Promise<CollectionRow[]>
 
 type SessionResult = { session: Session | null; reason?: 'inactive' | 'missing' };
 
-/** Reads the signed-in user's profile and decides if he is an admin or an agent. */
+/** Reads the signed-in user's profile and decides if he is an admin, a vice admin, the accountant or an agent. */
 async function buildSession(userId: string): Promise<SessionResult> {
   if (!supabase) return { session: null, reason: 'missing' };
   const { data, error } = await supabase.from('profiles').select(PROFILE_COLUMNS).eq('id', userId).maybeSingle();
@@ -148,7 +154,9 @@ async function buildSession(userId: string): Promise<SessionResult> {
       ? { role: 'admin', name: agent.name }
       : profile.role === 'vice_admin'
         ? { role: 'vice_admin', name: agent.name }
-        : { role: 'agent', agentId: agent.id, name: agent.name },
+        : profile.role === 'accountant'
+          ? { role: 'accountant', agentId: agent.id, name: agent.name }
+          : { role: 'agent', agentId: agent.id, name: agent.name },
   };
 }
 
@@ -180,6 +188,10 @@ function AppInner() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [corrections, setCorrections] = useState<CorrectionRequest[]>([]);
+  // Office revenue (entered by the accountant) and the accountant's profile (his daily plan)
+  const [office, setOffice] = useState<OfficeRevenue[]>([]);
+  const [codes, setCodes] = useState<RevenueCode[]>([]);
+  const [accountant, setAccountant] = useState<OfficeAccountant | null>(null);
 
   /* 1. Restore the saved Supabase sign-in when the app opens */
   useEffect(() => {
@@ -222,6 +234,9 @@ function AppInner() {
       setCollections([]);
       setRecommendations([]);
       setCorrections([]);
+      setOffice([]);
+      setCodes([]);
+      setAccountant(null);
       setDataReady(false);
       return;
     }
@@ -231,6 +246,28 @@ function AppInner() {
 
     (async () => {
       try {
+        // The accountant only needs his own profile, the revenue codes and the office revenue.
+        if (session.role === 'accountant') {
+          const [profileResult, officeRows, codesResult] = await Promise.all([
+            sb.from('profiles').select(PROFILE_COLUMNS).eq('id', session.agentId ?? '').maybeSingle(),
+            fetchAllOffice(sb),
+            sb.from('revenue_codes').select(CODE_COLUMNS).order('code'),
+          ]);
+          if (profileResult.error) throw profileResult.error;
+          if (codesResult.error) throw codesResult.error;
+          if (cancelled) return;
+
+          setAgents([]);
+          setCollections([]);
+          setRecommendations([]);
+          setCorrections([]);
+          setAccountant(profileResult.data ? rowToAccountant(profileResult.data as ProfileRow) : null);
+          setOffice(officeRows.map(rowToOffice));
+          setCodes(((codesResult.data ?? []) as RevenueCodeRow[]).map(rowToCode));
+          setDataReady(true);
+          return;
+        }
+
         const profilesRequest = session.role !== 'agent'
           ? sb.from('profiles').select(PROFILE_COLUMNS).eq('role', 'agent').order('username')
           : sb.from('profiles').select(PROFILE_COLUMNS).eq('id', session.agentId ?? '');
@@ -254,12 +291,37 @@ function AppInner() {
           console.warn('Correction requests are not available:', err);
         }
 
+        // Office revenue (entered by the accountant): administrator and vice administrators only.
+        // If the database file 009_office_revenue.sql has not been run yet, the rest of the app still works.
+        let officeRows: OfficeRevenueRow[] = [];
+        let codeRows: RevenueCodeRow[] = [];
+        let accountantRow: ProfileRow | null = null;
+        if (session.role === 'admin' || session.role === 'vice_admin') {
+          try {
+            const [officeData, codesResult, accountantResult] = await Promise.all([
+              fetchAllOffice(sb),
+              sb.from('revenue_codes').select(CODE_COLUMNS).order('code'),
+              sb.from('profiles').select(PROFILE_COLUMNS).eq('role', 'accountant').order('username').limit(1),
+            ]);
+            if (codesResult.error) throw codesResult.error;
+            if (accountantResult.error) throw accountantResult.error;
+            officeRows = officeData;
+            codeRows = (codesResult.data ?? []) as RevenueCodeRow[];
+            accountantRow = ((accountantResult.data ?? []) as ProfileRow[])[0] ?? null;
+          } catch (err) {
+            console.warn('Office revenue is not available:', err);
+          }
+        }
+
         if (cancelled) return;
 
         setAgents(((profilesResult.data ?? []) as ProfileRow[]).map(profileToAgent));
         setCollections(collectionRows.map(rowToCollection));
         setRecommendations(((recommendationsResult.data ?? []) as RecommendationRow[]).map(rowToRecommendation));
         setCorrections(correctionRows.map(rowToCorrection));
+        setOffice(officeRows.map(rowToOffice));
+        setCodes(codeRows.map(rowToCode));
+        setAccountant(accountantRow ? rowToAccountant(accountantRow) : null);
         setDataReady(true);
       } catch (err) {
         console.error('Data load error:', err);
@@ -315,6 +377,24 @@ function AppInner() {
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'correction_requests' }, (payload) => {
         upsert(rowToCorrection(payload.new as CorrectionRow));
+      })
+      .subscribe();
+
+    return () => {
+      void sb.removeChannel(channel);
+    };
+  }, [session]);
+
+  /* 3c. Live updates for office revenue (own channel, so a missing table can never disturb the other updates) */
+  useEffect(() => {
+    const sb = supabase;
+    if (!session || !sb || session.role === 'agent') return;
+
+    const channel = sb
+      .channel('live-office')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'office_revenues' }, (payload) => {
+        const row = rowToOffice(payload.new as OfficeRevenueRow);
+        setOffice((current) => (current.some((item) => item.id === row.id) ? current : [...current, row]));
       })
       .subscribe();
 
@@ -409,6 +489,16 @@ function AppInner() {
     }
   };
 
+  /** The administrator sets the accountant's daily plan (profiles.daily_target). Throws on failure. */
+  const handleSaveOfficePlan = async (daily: number) => {
+    if (!supabase) throw new Error('Database connection is not configured.');
+    if (!accountant) throw new Error('There is no accountant account yet.');
+    const { data, error } = await supabase.from('profiles').update({ daily_target: daily }).eq('id', accountant.id).select('id');
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error('The plan could not be saved (no permission).');
+    setAccountant((current) => (current ? { ...current, daily } : current));
+  };
+
   if (booting) return <Splash />;
 
   if (!supabase) {
@@ -455,6 +545,11 @@ function AppInner() {
       corrections={corrections}
       onSubmitCorrection={handleSubmitCorrection}
       onDecideCorrection={handleDecideCorrection}
+      office={office}
+      setOffice={setOffice}
+      codes={codes}
+      accountant={accountant}
+      onSaveOfficePlan={handleSaveOfficePlan}
       onLogout={handleLogout}
     />
   );
@@ -620,6 +715,11 @@ type ShellProps = {
   corrections: CorrectionRequest[];
   onSubmitCorrection: (input: NewCorrectionInput) => Promise<void>;
   onDecideCorrection: (id: string, decision: 'approve' | 'reject', note: string) => Promise<void>;
+  office: OfficeRevenue[];
+  setOffice: (next: OfficeRevenue[] | ((current: OfficeRevenue[]) => OfficeRevenue[])) => void;
+  codes: RevenueCode[];
+  accountant: OfficeAccountant | null;
+  onSaveOfficePlan: (daily: number) => Promise<void>;
   onLogout: () => void;
 };
 
@@ -679,18 +779,20 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
   );
 }
 
-function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, corrections, onSubmitCorrection, onDecideCorrection, onLogout }: ShellProps) {
+function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, corrections, onSubmitCorrection, onDecideCorrection, office, setOffice, codes, accountant, onSaveOfficePlan, onLogout }: ShellProps) {
   const { t, lang } = useLang();
-  const [tab, setTab] = useState<Tab>(session.role !== 'agent' ? 'overview' : 'entry');
+  const isAccountant = session.role === 'accountant';
+  const [tab, setTab] = useState<Tab>(isAccountant ? 'accHome' : session.role !== 'agent' ? 'overview' : 'entry');
   const [mobileOpen, setMobileOpen] = useState(false);
   const isAdmin = session.role === 'admin'; // the main administrator
-  const isStaff = session.role !== 'agent'; // administrator or vice administrator
-  const roleLabel = isAdmin ? t('administrator') : isStaff ? (lang === 'am' ? 'ም/አስተዳዳሪ' : 'Vice administrator') : t('fieldAgent');
+  const isStaff = session.role === 'admin' || session.role === 'vice_admin'; // administrator or vice administrator
+  const roleLabel = isAdmin ? t('administrator') : isStaff ? (lang === 'am' ? 'ም/አስተዳዳሪ' : 'Vice administrator') : isAccountant ? (lang === 'am' ? 'የሂሳብ ባለሙያ' : 'Accountant') : t('fieldAgent');
   const pendingCount = corrections.filter((request) => request.status === 'pending').length;
 
   const adminNav: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
     { id: 'overview', label: t('overview'), icon: BarChart3 },
     { id: 'agents', label: t('fieldAgents'), icon: Users },
+    { id: 'office', label: lang === 'am' ? 'የቢሮ ገቢ' : 'Office revenue', icon: Building2 },
     { id: 'reports', label: t('monthlyReports'), icon: FileText },
     { id: 'recommendations', label: t('recommendations'), icon: MessageSquareText },
     { id: 'corrections', label: lang === 'am' ? 'የእርማት ጥያቄዎች' : 'Corrections', icon: ClipboardCheck },
@@ -702,12 +804,20 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
     { id: 'history', label: t('history'), icon: ClipboardList },
     { id: 'settings', label: t('settings'), icon: Settings },
   ];
-  // A vice administrator sees only these four pages (no agent management, no correction requests).
-  const viceAdminTabs: Tab[] = ['overview', 'reports', 'recommendations', 'settings'];
-  const nav = isAdmin ? adminNav : isStaff ? adminNav.filter((item) => viceAdminTabs.includes(item.id)) : agentNav;
+  // The accountant sees only his own four pages.
+  const accountantNav: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
+    { id: 'accHome', label: t('home'), icon: Home },
+    { id: 'accEntry', label: lang === 'am' ? 'ገቢ ይመዝግቡ' : 'Record revenue', icon: Receipt },
+    { id: 'accHistory', label: t('history'), icon: ClipboardList },
+    { id: 'settings', label: t('settings'), icon: Settings },
+  ];
+  const accountantTabs: Tab[] = ['accHome', 'accEntry', 'accHistory', 'settings'];
+  // A vice administrator sees only these pages (no agent management, no correction requests).
+  const viceAdminTabs: Tab[] = ['overview', 'office', 'reports', 'recommendations', 'settings'];
+  const nav = isAccountant ? accountantNav : isAdmin ? adminNav : isStaff ? adminNav.filter((item) => viceAdminTabs.includes(item.id)) : agentNav;
   const go = (next: Tab) => {
-    const allowed = isAdmin || !isStaff || viceAdminTabs.includes(next);
-    setTab(allowed ? next : 'overview');
+    const allowed = isAccountant ? accountantTabs.includes(next) : isAdmin || !isStaff || viceAdminTabs.includes(next);
+    setTab(allowed ? next : isAccountant ? 'accHome' : 'overview');
     setMobileOpen(false);
   };
 
@@ -772,7 +882,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <NotificationBell agents={agents} collections={collections} isAdmin={isStaff} agentId={session.agentId} />
+            {!isAccountant && <NotificationBell agents={agents} collections={collections} isAdmin={isStaff} agentId={session.agentId} />}
             <div className="hidden h-8 w-px bg-[#d9e2ec] sm:block" />
             <div className="hidden text-right sm:block">
               <div className="text-sm font-semibold">{session.name}</div>
@@ -795,9 +905,25 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
               <span aria-hidden="true">→</span>
             </button>
           )}
-          {isStaff ? (
+          {isAccountant ? (
+            !accountant ? (
+              <div className="rounded-2xl border border-[#d9e2ec] bg-white p-8 text-center text-sm text-[#627d98]">
+                {lang === 'am' ? 'መገለጫዎን መጫን አልተቻለም። እንደገና ይግቡ ወይም አስተዳዳሪውን ይጠይቁ።' : 'Your profile could not be loaded. Sign in again or ask the administrator.'}
+              </div>
+            ) : tab === 'accEntry' ? (
+              <AccountantEntry accountant={accountant} office={office} codes={codes} setOffice={setOffice} onDone={() => go('accHistory')} />
+            ) : tab === 'accHistory' ? (
+              <AccountantHistory accountant={accountant} office={office} codes={codes} />
+            ) : tab === 'settings' ? (
+              <AdminSettings name={session.name} onLogout={onLogout} roleLabel={roleLabel} />
+            ) : (
+              <AccountantHome accountant={accountant} office={office} codes={codes} onNavigate={go} />
+            )
+          ) : isStaff ? (
             tab === 'overview' ? (
-              <AdminOverview agents={agents} collections={collections} onNavigate={go} canManageAgents={isAdmin} />
+              <AdminOverview agents={agents} collections={collections} office={office} codes={codes} accountant={accountant} onNavigate={go} canManageAgents={isAdmin} />
+            ) : tab === 'office' ? (
+              <AdminOffice office={office} codes={codes} accountant={accountant} canEditPlan={isAdmin} onSavePlan={onSaveOfficePlan} />
             ) : tab === 'agents' ? (
               <AgentManagement agents={agents} setAgents={setAgents} collections={collections} />
             ) : tab === 'corrections' ? (
@@ -823,7 +949,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
 
       {!isStaff && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-[#d9e2ec] bg-white/95 px-2 py-2 backdrop-blur lg:hidden">
-          {agentNav.map((item) => {
+          {(isAccountant ? accountantNav : agentNav).map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
             return (
@@ -871,12 +997,15 @@ function StatCard({ label, value, change, tone, icon }: { label: string; value: 
 
 /* ---------- Admin Overview ---------- */
 
-function AdminOverview({ agents, collections, onNavigate, canManageAgents }: { agents: Agent[]; collections: Collection[]; onNavigate: (tab: Tab) => void; canManageAgents: boolean }) {
+function AdminOverview({ agents, collections, office, codes, accountant, onNavigate, canManageAgents }: { agents: Agent[]; collections: Collection[]; office: OfficeRevenue[]; codes: RevenueCode[]; accountant: OfficeAccountant | null; onNavigate: (tab: Tab) => void; canManageAgents: boolean }) {
   const { t, lang } = useLang();
   const todayTotal = collections.filter((item) => item.date === isoToday).reduce((sum, item) => sum + item.amount, 0);
   const monthTotal = collections.filter((item) => item.date.startsWith(currentMonth)).reduce((sum, item) => sum + item.amount, 0);
   const yearTotal = collections.filter((item) => item.date.startsWith(currentYear)).reduce((sum, item) => sum + item.amount, 0);
   const allTimeTotal = collections.reduce((sum, item) => sum + item.amount, 0);
+  // Office revenue (entered by the accountant) is shown separately from the agents' revenue, never added into their numbers.
+  const officeEnabled = accountant !== null || office.length > 0;
+  const officeSums = officeTotals(office);
   const categoryData = bucketTotals(collections).map(({ bucket, amount }) => ({
     name: lang === 'am' ? bucket.am : bucket.en,
     value: amount,
@@ -893,12 +1022,16 @@ function AdminOverview({ agents, collections, onNavigate, canManageAgents }: { a
     <>
       <PageTitle eyebrow={t('executiveSummary')} title={t('collectionPerformance')} description={t('liveViewDescription')}
         action={<button onClick={() => onNavigate('reports')} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#102a43] px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#173f61]"><FileText size={17} /> {t('generateReport')}</button>} />
+      {officeEnabled && <OfficeTotalBanner agents={{ today: todayTotal, month: monthTotal, year: yearTotal }} office={officeSums} />}
+      {officeEnabled && <SourceHeading color={agentSourceColor} title={lang === 'am' ? 'የ field agents ገቢ' : 'Field agents revenue'} />}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label={t('collectedToday')} value={etb(todayTotal)} change={t('today')} tone="bg-[#e5f6ef] text-[#157a56]" icon={<Receipt size={20} />} />
         <StatCard label={t('thisMonth')} value={etb(monthTotal)} change={currentMonth} tone="bg-[#eaf2fb] text-[#2d7dd2]" icon={<CalendarDays size={20} />} />
         <StatCard label={t('thisYear')} value={etb(yearTotal)} change={currentYear} tone="bg-[#fff5dc] text-[#a36b05]" icon={<Target size={20} />} />
         <StatCard label={t('activeAgents')} value={`${agents.filter((item) => item.active).length} / ${agents.length}`} change={t('all')} tone="bg-[#f1edff] text-[#6f5acb]" icon={<Users size={20} />} />
       </div>
+      {officeEnabled && <OfficeKpiRow accountant={accountant} totals={officeSums} />}
+      {officeEnabled && <SourceHeading color={agentSourceColor} title={lang === 'am' ? 'የ field agents አፈጻጸም' : 'Field agents performance'} />}
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.3fr_.7fr]">
         <div className="rounded-2xl border border-[#d9e2ec] bg-white p-5 sm:p-6">
           <div className="flex items-center justify-between">
@@ -968,6 +1101,7 @@ function AdminOverview({ agents, collections, onNavigate, canManageAgents }: { a
           </div>
         </div>
       </div>
+      {officeEnabled && <OfficeBreakdown office={office} codes={codes} onOpen={() => onNavigate('office')} />}
       <div className="mt-6 rounded-2xl border border-[#d9e2ec] bg-white p-5 sm:p-6">
         <div className="flex items-center justify-between">
           <div>

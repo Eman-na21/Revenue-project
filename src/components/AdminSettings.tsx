@@ -8,9 +8,11 @@ type Props = {
   name: string;
   onLogout: () => void;
   isViceAdmin?: boolean;
+  /** Overrides the role text (used for the accountant). */
+  roleLabel?: string;
 };
 
-export function AdminSettings({ name, onLogout, isViceAdmin = false }: Props) {
+export function AdminSettings({ name, onLogout, isViceAdmin = false, roleLabel }: Props) {
   const { t, lang } = useLang();
   const viceLabel = lang === 'am' ? 'ም/አስተዳዳሪ' : 'Vice administrator';
   const [currentPassword, setCurrentPassword] = useState('');
@@ -74,7 +76,7 @@ export function AdminSettings({ name, onLogout, isViceAdmin = false }: Props) {
           </div>
           <div>
             <h3 className="font-display text-lg font-bold text-[#102a43]">{name}</h3>
-            <p className="text-sm text-[#829ab1]">{isViceAdmin ? viceLabel : '@admin'}</p>
+            <p className="text-sm text-[#829ab1]">{roleLabel ?? (isViceAdmin ? viceLabel : '@admin')}</p>
           </div>
         </div>
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -82,7 +84,7 @@ export function AdminSettings({ name, onLogout, isViceAdmin = false }: Props) {
             <UserRound size={18} className="text-[#829ab1]" />
             <div>
               <div className="text-xs text-[#829ab1]">{t('role')}</div>
-              <div className="text-sm font-semibold text-[#102a43]">{isViceAdmin ? viceLabel : t('administrator')}</div>
+              <div className="text-sm font-semibold text-[#102a43]">{roleLabel ?? (isViceAdmin ? viceLabel : t('administrator'))}</div>
             </div>
           </div>
           <div className="flex items-center gap-3 rounded-xl bg-[#f4f7fb] p-4">

@@ -1,6 +1,6 @@
-export type Role = 'admin' | 'vice_admin' | 'agent';
+export type Role = 'admin' | 'vice_admin' | 'agent' | 'accountant';
 export type Category = 'Chat' | 'Royalty' | 'Other Revenue';
-export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings' | 'corrections';
+export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings' | 'corrections' | 'office' | 'accHome' | 'accEntry' | 'accHistory';
 
 export type Agent = {
   id: string; // = Supabase profile / auth user UUID
@@ -38,6 +38,7 @@ export type Recommendation = {
 
 export type Session = {
   role: Role;
+  /** The signed-in user's own profile id (used for agents and for the accountant). */
   agentId?: string;
   name: string;
 };
