@@ -64,8 +64,9 @@ export function downloadAllAgentsExcel(
   const reportRows = agents.map((agent) => {
     const chat = categoryTotal(agent, 'Chat');
     const royalty = categoryTotal(agent, 'Royalty');
+    const trade = categoryTotal(agent, 'Trade Revenue');
     const other = categoryTotal(agent, 'Other Revenue');
-    const totalActual = chat + royalty + other;
+    const totalActual = chat + royalty + trade + other;
 
     // Plan comes from the agent's configured DAILY TARGET.
     // Total Plan = daily target × number of selected days.
@@ -77,16 +78,19 @@ export function downloadAllAgentsExcel(
       dailyPlan,
       chat,
       royalty,
+      trade,
       other,
       totalActual,
       totalPlan,
-      chatPercent: percentValue(chat, dailyPlan),
-      royaltyPercent: percentValue(royalty, dailyPlan),
-      otherPercent: percentValue(other, dailyPlan),
+      chatPercent: percentValue(chat, totalPlan),
+      royaltyPercent: percentValue(royalty, totalPlan),
+      tradePercent: percentValue(trade, totalPlan),
+      otherPercent: percentValue(other, totalPlan),
       totalPercentValue: percentValue(totalActual, totalPlan),
-      chatDisplay: percent(chat, dailyPlan),
-      royaltyDisplay: percent(royalty, dailyPlan),
-      otherDisplay: percent(other, dailyPlan),
+      chatDisplay: percent(chat, totalPlan),
+      royaltyDisplay: percent(royalty, totalPlan),
+      tradeDisplay: percent(trade, totalPlan),
+      otherDisplay: percent(other, totalPlan),
       totalDisplay: percent(totalActual, totalPlan),
     };
   });
@@ -96,9 +100,10 @@ export function downloadAllAgentsExcel(
     percentageKey:
       | 'chatPercent'
       | 'royaltyPercent'
+      | 'tradePercent'
       | 'otherPercent'
       | 'totalPercentValue',
-    amountKey: 'chat' | 'royalty' | 'other' | 'totalActual',
+    amountKey: 'chat' | 'royalty' | 'trade' | 'other' | 'totalActual',
   ) => {
     const ranked = [...reportRows].sort(
       (a, b) =>
@@ -116,6 +121,7 @@ export function downloadAllAgentsExcel(
 
   const chatRankMap = createRankMap('chatPercent', 'chat');
   const royaltyRankMap = createRankMap('royaltyPercent', 'royalty');
+  const tradeRankMap = createRankMap('tradePercent', 'trade');
   const otherRankMap = createRankMap('otherPercent', 'other');
   const totalRankMap = createRankMap('totalPercentValue', 'totalActual');
 
@@ -125,17 +131,22 @@ export function downloadAllAgentsExcel(
       <tr>
         <td class="agent">${escapeCell(row.agent.name)}</td>
 
-        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.chat)}</td>
         <td class="number">${row.chatDisplay}</td>
         <td class="rank">${chatRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
-        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.royalty)}</td>
         <td class="number">${row.royaltyDisplay}</td>
         <td class="rank">${royaltyRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
-        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.totalPlan)}</td>
+        <td class="number">${money(row.trade)}</td>
+        <td class="number">${row.tradeDisplay}</td>
+        <td class="rank">${tradeRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
+
+        <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.other)}</td>
         <td class="number">${row.otherDisplay}</td>
         <td class="rank">${otherRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
@@ -149,18 +160,15 @@ export function downloadAllAgentsExcel(
     )
     .join('');
 
-  const totalDailyPlan = reportRows.reduce(
-    (sum, row) => sum + row.dailyPlan,
-    0,
-  );
   const totalPlan = reportRows.reduce((sum, row) => sum + row.totalPlan, 0);
   const totalChat = reportRows.reduce((sum, row) => sum + row.chat, 0);
   const totalRoyalty = reportRows.reduce(
     (sum, row) => sum + row.royalty,
     0,
   );
+  const totalTrade = reportRows.reduce((sum, row) => sum + row.trade, 0);
   const totalOther = reportRows.reduce((sum, row) => sum + row.other, 0);
-  const grandTotal = totalChat + totalRoyalty + totalOther;
+  const grandTotal = totalChat + totalRoyalty + totalTrade + totalOther;
 
   // Royalty split: Forest vs Sand (old records without a type go to "Not specified")
   const royaltyOf = (agent: Agent, type: 'forest' | 'sand' | 'unspecified') =>
@@ -301,10 +309,16 @@ export function downloadAllAgentsExcel(
               <th rowspan="2">Name of Agents</th>
               <th class="group" colspan="4">Chat</th>
               <th class="group" colspan="4">Royalty</th>
+              <th class="group" colspan="4">Trade Revenue</th>
               <th class="group" colspan="4">Other Revenue</th>
               <th class="group" colspan="4">Total</th>
             </tr>
             <tr>
+              <th class="subhead">Plan</th>
+              <th class="subhead">Performance</th>
+              <th class="subhead">%</th>
+              <th class="subhead">Rank</th>
+
               <th class="subhead">Plan</th>
               <th class="subhead">Performance</th>
               <th class="subhead">%</th>
@@ -330,25 +344,30 @@ export function downloadAllAgentsExcel(
           <tbody>
             ${
               bodyRows ||
-              `<tr><td colspan="17">No agents found.</td></tr>`
+              `<tr><td colspan="21">No agents found.</td></tr>`
             }
 
             <tr class="total">
               <td>TOTAL</td>
 
-              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(totalChat)}</td>
-              <td class="number">${percent(totalChat, totalDailyPlan)}</td>
+              <td class="number">${percent(totalChat, totalPlan)}</td>
               <td class="rank">—</td>
 
-              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(totalRoyalty)}</td>
-              <td class="number">${percent(totalRoyalty, totalDailyPlan)}</td>
+              <td class="number">${percent(totalRoyalty, totalPlan)}</td>
               <td class="rank">—</td>
 
-              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalPlan)}</td>
+              <td class="number">${money(totalTrade)}</td>
+              <td class="number">${percent(totalTrade, totalPlan)}</td>
+              <td class="rank">—</td>
+
+              <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(totalOther)}</td>
-              <td class="number">${percent(totalOther, totalDailyPlan)}</td>
+              <td class="number">${percent(totalOther, totalPlan)}</td>
               <td class="rank">—</td>
 
               <td class="number">${money(totalPlan)}</td>

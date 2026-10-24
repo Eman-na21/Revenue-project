@@ -1,23 +1,27 @@
 import { useMemo, useState } from 'react';
-import { CalendarDays, ClipboardList, Receipt, Search } from 'lucide-react';
+import { CalendarDays, CheckCircle2, ClipboardList, Clock, Pencil, Receipt, Search, XCircle } from 'lucide-react';
 import { currentMonth, etb, etbShort, formatDate, formatDayLabel, isoToday } from '@/types';
 import { useLang } from '@/i18n';
 import { ReceiptButton } from '@/components/ReceiptViewer';
-import { OfficeAccountant, OfficeRevenue, RevenueCode, codeLabel, monthlyPlanOf, percentOf, sortNewestFirst, sumAmount } from '@/office';
+import { OfficeCorrectionModal } from '@/components/OfficeCorrectionModal';
+import { NewOfficeCorrectionInput, OfficeAccountant, OfficeCorrection, OfficeRevenue, RevenueCode, codeLabel, monthlyPlanOf, percentOf, sortNewestFirst, sumAmount } from '@/office';
 
 type Props = {
   accountant: OfficeAccountant;
   office: OfficeRevenue[];
   codes: RevenueCode[];
+  corrections: OfficeCorrection[];
+  onSubmitCorrection: (input: NewOfficeCorrectionInput) => Promise<void>;
 };
 
 /** All office revenue entries, newest first, grouped by day. */
-export function AccountantHistory({ accountant, office, codes }: Props) {
+export function AccountantHistory({ accountant, office, codes, corrections, onSubmitCorrection }: Props) {
   const { lang } = useLang();
   const tr = (en: string, am: string) => (lang === 'am' ? am : en);
 
   const [codeFilter, setCodeFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [editing, setEditing] = useState<OfficeRevenue | null>(null);
 
   const usedCodes = useMemo(() => Array.from(new Set(office.map((item) => item.code))).sort(), [office]);
 
@@ -41,12 +45,48 @@ export function AccountantHistory({ accountant, office, codes }: Props) {
   const monthTotal = sumAmount(office.filter((item) => item.date.startsWith(currentMonth)));
   const todayItems = office.filter((item) => item.date === isoToday);
 
+  /** Status of the correction request of one entry, and the button to ask for a correction. */
+  const correctionRow = (item: OfficeRevenue) => {
+    const requests = corrections.filter((request) => request.entryId === item.id);
+    const pendingRequest = requests.find((request) => request.status === 'pending');
+    const lastDecided = requests
+      .filter((request) => request.status !== 'pending')
+      .sort((a, b) => (b.decidedAt ?? '').localeCompare(a.decidedAt ?? ''))[0];
+    return (
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[#f0f4f8] pt-3 text-xs">
+        {pendingRequest ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#fff5dc] px-2.5 py-1 font-bold text-[#a36b05]">
+            <Clock size={12} /> {tr('Correction requested, waiting for the administrator', 'እርማት ተጠይቋል፣ አስተዳዳሪው እየጠበቀ ነው')}
+          </span>
+        ) : lastDecided?.status === 'approved' ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#e5f6ef] px-2.5 py-1 font-bold text-[#157a56]">
+            <CheckCircle2 size={12} /> {tr('Corrected', 'ተስተካክሏል')}
+          </span>
+        ) : lastDecided?.status === 'rejected' ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#fff1f0] px-2.5 py-1 font-bold text-[#c0392b]">
+            <XCircle size={12} /> {tr('Correction rejected', 'እርማቱ ተቀባይነት አላገኘም')}{lastDecided.adminNote ? `: ${lastDecided.adminNote}` : ''}
+          </span>
+        ) : null}
+
+        {!pendingRequest && (
+          <button
+            type="button"
+            onClick={() => setEditing(item)}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 font-bold text-[#2d7dd2] transition hover:bg-[#eaf2fb]"
+          >
+            <Pencil size={12} /> {tr('Request correction', 'እርማት ጠይቅ')}
+          </button>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="animate-slide-up">
         <div className="text-xs font-bold uppercase tracking-[.18em] text-[#2cb67d]">{tr('Office revenue', 'የቢሮ ገቢ')}</div>
         <h1 className="mt-2 font-display text-3xl font-bold tracking-tight text-[#102a43]">{tr('My entries', 'መዝገቦቼ')}</h1>
-        <p className="mt-2 text-sm text-[#627d98]">{tr('To correct a mistake, tell the administrator.', 'ስህተት ለማስተካከል አስተዳዳሪውን ያሳውቁ።')}</p>
+        <p className="mt-2 text-sm text-[#627d98]">{tr('To fix a mistake, press “Request correction” on the entry. The entry changes after the administrator approves.', 'ስህተት ለማስተካከል በመዝገቡ ላይ “እርማት ጠይቅ” ይጫኑ። መዝገቡ አስተዳዳሪው ሲያጸድቅ ይቀየራል።')}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
@@ -128,12 +168,15 @@ export function AccountantHistory({ accountant, office, codes }: Props) {
                     </div>
                     <span className="shrink-0 font-display text-lg font-bold text-[#102a43]">{etb(item.amount)}</span>
                   </div>
+                  {correctionRow(item)}
                 </div>
               ))}
             </div>
           </div>
         ))}
       </div>
+
+      {editing && <OfficeCorrectionModal entry={editing} codes={codes} onClose={() => setEditing(null)} onSubmit={onSubmitCorrection} />}
     </div>
   );
 }

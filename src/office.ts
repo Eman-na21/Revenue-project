@@ -178,3 +178,81 @@ export function totalsByCode(items: OfficeRevenue[]): CodeTotal[] {
 
 /** Colours for the per-code bars (cycled). */
 export const codeColors = ['#2d7dd2', '#2cb67d', '#e4b44c', '#0fa3b1', '#6f5acb', '#c0392b', '#8aa4bd'];
+
+/* ---------- Correction requests (the accountant asks, the administrator approves or rejects) ---------- */
+
+export type OfficeCorrectionStatus = 'pending' | 'approved' | 'rejected';
+
+/** A request from the accountant to replace the wrong values of one saved office revenue entry. */
+export type OfficeCorrection = {
+  id: string;
+  entryId: string;
+  requestedBy: string;
+  oldCode: string;
+  oldAmount: number;
+  oldReceipt: string;
+  oldNotes: string;
+  newCode: string;
+  newAmount: number;
+  newReceipt: string;
+  newNotes: string;
+  reason: string;
+  status: OfficeCorrectionStatus;
+  adminNote: string;
+  createdAt: string;
+  decidedAt: string | null;
+};
+
+/** What the accountant fills in when he asks for a correction. */
+export type NewOfficeCorrectionInput = {
+  entryId: string;
+  code: string;
+  amount: number;
+  receipt: string;
+  notes: string;
+  reason: string;
+};
+
+export type OfficeCorrectionRow = {
+  id: string;
+  office_revenue_id: string;
+  requested_by: string | null;
+  old_code: string | null;
+  old_amount: unknown;
+  old_receipt_number: string | null;
+  old_notes: string | null;
+  new_code: string;
+  new_amount: unknown;
+  new_receipt_number: string | null;
+  new_notes: string | null;
+  reason: string | null;
+  status: string | null;
+  admin_note: string | null;
+  decided_at: string | null;
+  created_at: string;
+};
+
+export const OFFICE_CORRECTION_COLUMNS =
+  'id, office_revenue_id, requested_by, old_code, old_amount, old_receipt_number, old_notes, ' +
+  'new_code, new_amount, new_receipt_number, new_notes, reason, status, admin_note, decided_at, created_at';
+
+export function rowToOfficeCorrection(row: OfficeCorrectionRow): OfficeCorrection {
+  return {
+    id: String(row.id),
+    entryId: String(row.office_revenue_id),
+    requestedBy: String(row.requested_by ?? '').trim(),
+    oldCode: String(row.old_code ?? '').trim(),
+    oldAmount: Number(row.old_amount) || 0,
+    oldReceipt: row.old_receipt_number ?? '',
+    oldNotes: row.old_notes ?? '',
+    newCode: String(row.new_code ?? '').trim(),
+    newAmount: Number(row.new_amount) || 0,
+    newReceipt: row.new_receipt_number ?? '',
+    newNotes: row.new_notes ?? '',
+    reason: row.reason ?? '',
+    status: row.status === 'approved' || row.status === 'rejected' ? row.status : 'pending',
+    adminNote: row.admin_note ?? '',
+    createdAt: row.created_at,
+    decidedAt: row.decided_at ?? null,
+  };
+}

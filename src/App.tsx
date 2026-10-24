@@ -25,7 +25,8 @@ import { AccountantEntry } from '@/components/AccountantEntry';
 import { AccountantHistory } from '@/components/AccountantHistory';
 import { AdminOffice } from '@/components/AdminOffice';
 import { OfficeBreakdown, OfficeKpiRow, OfficeTotalBanner, SourceHeading, agentSourceColor } from '@/components/OfficeOverview';
-import { CODE_COLUMNS, OfficeAccountant, OfficeRevenue, OfficeRevenueRow, RevenueCode, RevenueCodeRow, fetchAllOffice, officeTotals, rowToAccountant, rowToCode, rowToOffice } from '@/office';
+import { CODE_COLUMNS, NewOfficeCorrectionInput, OFFICE_CORRECTION_COLUMNS, OfficeAccountant, OfficeCorrection, OfficeCorrectionRow, OfficeRevenue, OfficeRevenueRow, RevenueCode, RevenueCodeRow, fetchAllOffice, officeTotals, rowToAccountant, rowToCode, rowToOffice, rowToOfficeCorrection } from '@/office';
+import { AdminOfficeCorrections } from '@/components/AdminOfficeCorrections';
 
 /* ---------- Shared normalization helpers ---------- */
 
@@ -192,6 +193,7 @@ function AppInner() {
   const [office, setOffice] = useState<OfficeRevenue[]>([]);
   const [codes, setCodes] = useState<RevenueCode[]>([]);
   const [accountant, setAccountant] = useState<OfficeAccountant | null>(null);
+  const [officeCorrections, setOfficeCorrections] = useState<OfficeCorrection[]>([]);
 
   /* 1. Restore the saved Supabase sign-in when the app opens */
   useEffect(() => {
@@ -237,6 +239,7 @@ function AppInner() {
       setOffice([]);
       setCodes([]);
       setAccountant(null);
+      setOfficeCorrections([]);
       setDataReady(false);
       return;
     }
@@ -255,12 +258,23 @@ function AppInner() {
           ]);
           if (profileResult.error) throw profileResult.error;
           if (codesResult.error) throw codesResult.error;
+          // His own correction requests: if 011_office_corrections.sql has not been run yet, the rest still works.
+          let ownCorrectionRows: OfficeCorrectionRow[] = [];
+          try {
+            const result = await sb.from('office_correction_requests').select(OFFICE_CORRECTION_COLUMNS).order('created_at', { ascending: false });
+            if (result.error) console.warn('Office correction requests are not available:', result.error.message);
+            else ownCorrectionRows = (result.data ?? []) as unknown as OfficeCorrectionRow[];
+          } catch (err) {
+            console.warn('Office correction requests are not available:', err);
+          }
+
           if (cancelled) return;
 
           setAgents([]);
           setCollections([]);
           setRecommendations([]);
           setCorrections([]);
+          setOfficeCorrections(ownCorrectionRows.map(rowToOfficeCorrection));
           setAccountant(profileResult.data ? rowToAccountant(profileResult.data as ProfileRow) : null);
           setOffice(officeRows.map(rowToOffice));
           setCodes(((codesResult.data ?? []) as RevenueCodeRow[]).map(rowToCode));
@@ -313,6 +327,18 @@ function AppInner() {
           }
         }
 
+        // The accountant's correction requests: administrator only (vice administrators cannot see them).
+        let officeCorrectionRows: OfficeCorrectionRow[] = [];
+        if (session.role === 'admin') {
+          try {
+            const result = await sb.from('office_correction_requests').select(OFFICE_CORRECTION_COLUMNS).order('created_at', { ascending: false });
+            if (result.error) console.warn('Office correction requests are not available:', result.error.message);
+            else officeCorrectionRows = (result.data ?? []) as unknown as OfficeCorrectionRow[];
+          } catch (err) {
+            console.warn('Office correction requests are not available:', err);
+          }
+        }
+
         if (cancelled) return;
 
         setAgents(((profilesResult.data ?? []) as ProfileRow[]).map(profileToAgent));
@@ -322,6 +348,7 @@ function AppInner() {
         setOffice(officeRows.map(rowToOffice));
         setCodes(codeRows.map(rowToCode));
         setAccountant(accountantRow ? rowToAccountant(accountantRow) : null);
+        setOfficeCorrections(officeCorrectionRows.map(rowToOfficeCorrection));
         setDataReady(true);
       } catch (err) {
         console.error('Data load error:', err);
@@ -395,6 +422,35 @@ function AppInner() {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'office_revenues' }, (payload) => {
         const row = rowToOffice(payload.new as OfficeRevenueRow);
         setOffice((current) => (current.some((item) => item.id === row.id) ? current : [...current, row]));
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'office_revenues' }, (payload) => {
+        const row = rowToOffice(payload.new as OfficeRevenueRow);
+        setOffice((current) => current.map((item) => (item.id === row.id ? row : item)));
+      })
+      .subscribe();
+
+    return () => {
+      void sb.removeChannel(channel);
+    };
+  }, [session]);
+
+  /* 3d. Live updates for the accountant's correction requests (administrator and accountant only) */
+  useEffect(() => {
+    const sb = supabase;
+    if (!session || !sb || (session.role !== 'admin' && session.role !== 'accountant')) return;
+
+    const upsert = (row: OfficeCorrection) =>
+      setOfficeCorrections((current) =>
+        current.some((item) => item.id === row.id) ? current.map((item) => (item.id === row.id ? row : item)) : [row, ...current],
+      );
+
+    const channel = sb
+      .channel('live-office-corrections')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'office_correction_requests' }, (payload) => {
+        upsert(rowToOfficeCorrection(payload.new as OfficeCorrectionRow));
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'office_correction_requests' }, (payload) => {
+        upsert(rowToOfficeCorrection(payload.new as OfficeCorrectionRow));
       })
       .subscribe();
 
@@ -489,6 +545,50 @@ function AppInner() {
     }
   };
 
+  /** The accountant asks for a correction. The database fills in the old values and who he is. Throws on failure. */
+  const handleSubmitOfficeCorrection = async (input: NewOfficeCorrectionInput) => {
+    if (!supabase) throw new Error('Database connection is not configured.');
+    const { data, error } = await supabase
+      .from('office_correction_requests')
+      .insert({
+        office_revenue_id: input.entryId,
+        new_code: input.code,
+        new_amount: input.amount,
+        new_receipt_number: input.receipt,
+        new_notes: input.notes,
+        reason: input.reason,
+      })
+      .select(OFFICE_CORRECTION_COLUMNS)
+      .single();
+    if (error) throw error;
+    const saved = rowToOfficeCorrection(data as unknown as OfficeCorrectionRow);
+    setOfficeCorrections((current) => (current.some((item) => item.id === saved.id) ? current : [saved, ...current]));
+  };
+
+  /** The administrator approves (the wrong values are replaced) or rejects a request of the accountant. Throws on failure. */
+  const handleDecideOfficeCorrection = async (id: string, decision: 'approve' | 'reject', note: string) => {
+    if (!supabase) throw new Error('Database connection is not configured.');
+    const { error } = await supabase.rpc(decision === 'approve' ? 'approve_office_correction' : 'reject_office_correction', {
+      p_request: id,
+      p_note: note || null,
+    });
+    if (error) throw error;
+
+    const { data } = await supabase.from('office_correction_requests').select(OFFICE_CORRECTION_COLUMNS).eq('id', id).single();
+    if (!data) return;
+    const updated = rowToOfficeCorrection(data as unknown as OfficeCorrectionRow);
+    setOfficeCorrections((current) => current.map((item) => (item.id === id ? updated : item)));
+    if (decision === 'approve') {
+      setOffice((current) =>
+        current.map((item) =>
+          item.id === updated.entryId
+            ? { ...item, code: updated.newCode, amount: updated.newAmount, receipt: updated.newReceipt, notes: updated.newNotes }
+            : item,
+        ),
+      );
+    }
+  };
+
   /** The administrator sets the accountant's daily plan (profiles.daily_target). Throws on failure. */
   const handleSaveOfficePlan = async (daily: number) => {
     if (!supabase) throw new Error('Database connection is not configured.');
@@ -550,6 +650,9 @@ function AppInner() {
       codes={codes}
       accountant={accountant}
       onSaveOfficePlan={handleSaveOfficePlan}
+      officeCorrections={officeCorrections}
+      onSubmitOfficeCorrection={handleSubmitOfficeCorrection}
+      onDecideOfficeCorrection={handleDecideOfficeCorrection}
       onLogout={handleLogout}
     />
   );
@@ -720,6 +823,9 @@ type ShellProps = {
   codes: RevenueCode[];
   accountant: OfficeAccountant | null;
   onSaveOfficePlan: (daily: number) => Promise<void>;
+  officeCorrections: OfficeCorrection[];
+  onSubmitOfficeCorrection: (input: NewOfficeCorrectionInput) => Promise<void>;
+  onDecideOfficeCorrection: (id: string, decision: 'approve' | 'reject', note: string) => Promise<void>;
   onLogout: () => void;
 };
 
@@ -779,7 +885,7 @@ function NotificationBell({ agents, collections, isAdmin, agentId }: { agents: A
   );
 }
 
-function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, corrections, onSubmitCorrection, onDecideCorrection, office, setOffice, codes, accountant, onSaveOfficePlan, onLogout }: ShellProps) {
+function Shell({ session, agents, collections, setAgents, setCollections, recommendations, onSaveRecommendation, corrections, onSubmitCorrection, onDecideCorrection, office, setOffice, codes, accountant, onSaveOfficePlan, officeCorrections, onSubmitOfficeCorrection, onDecideOfficeCorrection, onLogout }: ShellProps) {
   const { t, lang } = useLang();
   const isAccountant = session.role === 'accountant';
   const [tab, setTab] = useState<Tab>(isAccountant ? 'accHome' : session.role !== 'agent' ? 'overview' : 'entry');
@@ -787,7 +893,9 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
   const isAdmin = session.role === 'admin'; // the main administrator
   const isStaff = session.role === 'admin' || session.role === 'vice_admin'; // administrator or vice administrator
   const roleLabel = isAdmin ? t('administrator') : isStaff ? (lang === 'am' ? 'ም/አስተዳዳሪ' : 'Vice administrator') : isAccountant ? (lang === 'am' ? 'የሂሳብ ባለሙያ' : 'Accountant') : t('fieldAgent');
-  const pendingCount = corrections.filter((request) => request.status === 'pending').length;
+  const pendingCount =
+    corrections.filter((request) => request.status === 'pending').length +
+    officeCorrections.filter((request) => request.status === 'pending').length;
 
   const adminNav: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
     { id: 'overview', label: t('overview'), icon: BarChart3 },
@@ -913,7 +1021,7 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             ) : tab === 'accEntry' ? (
               <AccountantEntry accountant={accountant} office={office} codes={codes} setOffice={setOffice} onDone={() => go('accHistory')} />
             ) : tab === 'accHistory' ? (
-              <AccountantHistory accountant={accountant} office={office} codes={codes} />
+              <AccountantHistory accountant={accountant} office={office} codes={codes} corrections={officeCorrections} onSubmitCorrection={onSubmitOfficeCorrection} />
             ) : tab === 'settings' ? (
               <AdminSettings name={session.name} onLogout={onLogout} roleLabel={roleLabel} />
             ) : (
@@ -927,7 +1035,12 @@ function Shell({ session, agents, collections, setAgents, setCollections, recomm
             ) : tab === 'agents' ? (
               <AgentManagement agents={agents} setAgents={setAgents} collections={collections} />
             ) : tab === 'corrections' ? (
-              <AdminCorrections agents={agents} collections={collections} corrections={corrections} onDecide={onDecideCorrection} />
+              <div className="space-y-10">
+                <AdminCorrections agents={agents} collections={collections} corrections={corrections} onDecide={onDecideCorrection} />
+                {(accountant !== null || officeCorrections.length > 0) && (
+                  <AdminOfficeCorrections office={office} codes={codes} accountant={accountant} corrections={officeCorrections} onDecide={onDecideOfficeCorrection} />
+                )}
+              </div>
             ) : tab === 'recommendations' ? (
               <AdminRecommendations agents={agents} collections={collections} recommendations={recommendations} onSave={onSaveRecommendation} />
             ) : tab === 'settings' ? (
@@ -1548,8 +1661,9 @@ function downloadAllAgentsExcel(
   const reportRows = agents.map((agent) => {
     const chat = categoryTotal(agent, 'Chat');
     const royalty = categoryTotal(agent, 'Royalty');
+    const trade = categoryTotal(agent, 'Trade Revenue');
     const other = categoryTotal(agent, 'Other Revenue');
-    const totalActual = chat + royalty + other;
+    const totalActual = chat + royalty + trade + other;
 
     // Plan comes from the agent's configured DAILY TARGET.
     // Total Plan = daily target × number of selected days.
@@ -1561,16 +1675,19 @@ function downloadAllAgentsExcel(
       dailyPlan,
       chat,
       royalty,
+      trade,
       other,
       totalActual,
       totalPlan,
-      chatPercent: percentValue(chat, dailyPlan),
-      royaltyPercent: percentValue(royalty, dailyPlan),
-      otherPercent: percentValue(other, dailyPlan),
+      chatPercent: percentValue(chat, totalPlan),
+      royaltyPercent: percentValue(royalty, totalPlan),
+      tradePercent: percentValue(trade, totalPlan),
+      otherPercent: percentValue(other, totalPlan),
       totalPercentValue: percentValue(totalActual, totalPlan),
-      chatDisplay: percent(chat, dailyPlan),
-      royaltyDisplay: percent(royalty, dailyPlan),
-      otherDisplay: percent(other, dailyPlan),
+      chatDisplay: percent(chat, totalPlan),
+      royaltyDisplay: percent(royalty, totalPlan),
+      tradeDisplay: percent(trade, totalPlan),
+      otherDisplay: percent(other, totalPlan),
       totalDisplay: percent(totalActual, totalPlan),
     };
   });
@@ -1580,9 +1697,10 @@ function downloadAllAgentsExcel(
     percentageKey:
       | 'chatPercent'
       | 'royaltyPercent'
+      | 'tradePercent'
       | 'otherPercent'
       | 'totalPercentValue',
-    amountKey: 'chat' | 'royalty' | 'other' | 'totalActual',
+    amountKey: 'chat' | 'royalty' | 'trade' | 'other' | 'totalActual',
   ) => {
     const ranked = [...reportRows].sort(
       (a, b) =>
@@ -1600,6 +1718,7 @@ function downloadAllAgentsExcel(
 
   const chatRankMap = createRankMap('chatPercent', 'chat');
   const royaltyRankMap = createRankMap('royaltyPercent', 'royalty');
+  const tradeRankMap = createRankMap('tradePercent', 'trade');
   const otherRankMap = createRankMap('otherPercent', 'other');
   const totalRankMap = createRankMap('totalPercentValue', 'totalActual');
 
@@ -1609,17 +1728,22 @@ function downloadAllAgentsExcel(
       <tr>
         <td class="agent">${escapeCell(row.agent.name)}</td>
 
-        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.chat)}</td>
         <td class="number">${row.chatDisplay}</td>
         <td class="rank">${chatRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
-        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.royalty)}</td>
         <td class="number">${row.royaltyDisplay}</td>
         <td class="rank">${royaltyRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
 
-        <td class="number">${money(row.dailyPlan)}</td>
+        <td class="number">${money(row.totalPlan)}</td>
+        <td class="number">${money(row.trade)}</td>
+        <td class="number">${row.tradeDisplay}</td>
+        <td class="rank">${tradeRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
+
+        <td class="number">${money(row.totalPlan)}</td>
         <td class="number">${money(row.other)}</td>
         <td class="number">${row.otherDisplay}</td>
         <td class="rank">${otherRankMap.get(normalizeId(row.agent.id)) ?? '—'}</td>
@@ -1633,18 +1757,15 @@ function downloadAllAgentsExcel(
     )
     .join('');
 
-  const totalDailyPlan = reportRows.reduce(
-    (sum, row) => sum + row.dailyPlan,
-    0,
-  );
   const totalPlan = reportRows.reduce((sum, row) => sum + row.totalPlan, 0);
   const totalChat = reportRows.reduce((sum, row) => sum + row.chat, 0);
   const totalRoyalty = reportRows.reduce(
     (sum, row) => sum + row.royalty,
     0,
   );
+  const totalTrade = reportRows.reduce((sum, row) => sum + row.trade, 0);
   const totalOther = reportRows.reduce((sum, row) => sum + row.other, 0);
-  const grandTotal = totalChat + totalRoyalty + totalOther;
+  const grandTotal = totalChat + totalRoyalty + totalTrade + totalOther;
 
   // Royalty split: Forest vs Sand (old records without a type go to "Not specified")
   const royaltyOf = (agent: Agent, type: 'forest' | 'sand' | 'unspecified') =>
@@ -1785,10 +1906,16 @@ function downloadAllAgentsExcel(
               <th rowspan="2">Name of Agents</th>
               <th class="group" colspan="4">Chat</th>
               <th class="group" colspan="4">Royalty</th>
+              <th class="group" colspan="4">Trade Revenue</th>
               <th class="group" colspan="4">Other Revenue</th>
               <th class="group" colspan="4">Total</th>
             </tr>
             <tr>
+              <th class="subhead">Plan</th>
+              <th class="subhead">Performance</th>
+              <th class="subhead">%</th>
+              <th class="subhead">Rank</th>
+
               <th class="subhead">Plan</th>
               <th class="subhead">Performance</th>
               <th class="subhead">%</th>
@@ -1814,25 +1941,30 @@ function downloadAllAgentsExcel(
           <tbody>
             ${
               bodyRows ||
-              `<tr><td colspan="17">No agents found.</td></tr>`
+              `<tr><td colspan="21">No agents found.</td></tr>`
             }
 
             <tr class="total">
               <td>TOTAL</td>
 
-              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(totalChat)}</td>
-              <td class="number">${percent(totalChat, totalDailyPlan)}</td>
+              <td class="number">${percent(totalChat, totalPlan)}</td>
               <td class="rank">—</td>
 
-              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(totalRoyalty)}</td>
-              <td class="number">${percent(totalRoyalty, totalDailyPlan)}</td>
+              <td class="number">${percent(totalRoyalty, totalPlan)}</td>
               <td class="rank">—</td>
 
-              <td class="number">${money(totalDailyPlan)}</td>
+              <td class="number">${money(totalPlan)}</td>
+              <td class="number">${money(totalTrade)}</td>
+              <td class="number">${percent(totalTrade, totalPlan)}</td>
+              <td class="rank">—</td>
+
+              <td class="number">${money(totalPlan)}</td>
               <td class="number">${money(totalOther)}</td>
-              <td class="number">${percent(totalOther, totalDailyPlan)}</td>
+              <td class="number">${percent(totalOther, totalPlan)}</td>
               <td class="rank">—</td>
 
               <td class="number">${money(totalPlan)}</td>

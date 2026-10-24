@@ -1,5 +1,5 @@
 export type Role = 'admin' | 'vice_admin' | 'agent' | 'accountant';
-export type Category = 'Chat' | 'Royalty' | 'Other Revenue';
+export type Category = 'Chat' | 'Royalty' | 'Trade Revenue' | 'Other Revenue';
 export type Tab = 'overview' | 'agents' | 'reports' | 'recommendations' | 'entry' | 'collect' | 'history' | 'settings' | 'corrections' | 'office' | 'accHome' | 'accEntry' | 'accHistory';
 
 export type Agent = {
@@ -43,19 +43,21 @@ export type Session = {
   name: string;
 };
 
-export const categories: Category[] = ['Chat', 'Royalty', 'Other Revenue'];
+export const categories: Category[] = ['Chat', 'Royalty', 'Trade Revenue', 'Other Revenue'];
 
 /** Converts legacy database category names to the current UI names. */
 export const normalizeCategory = (value: unknown): Category => {
   const category = String(value ?? '').trim();
   if (category === 'Chat Royalty' || category === 'Chat') return 'Chat';
   if (category === 'Traffic Fines' || category === 'Royalty') return 'Royalty';
+  if (category === 'Trade Revenue') return 'Trade Revenue';
   return 'Other Revenue';
 };
 
 export const categoryStyles: Record<Category, { bg: string; text: string; solid: string; light: string }> = {
   'Chat': { bg: 'bg-[#e5f6ef]', text: 'text-[#157a56]', solid: 'bg-[#2cb67d]', light: 'bg-[#e5f6ef]' },
   'Royalty': { bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]', light: 'bg-[#eaf2fb]' },
+  'Trade Revenue': { bg: 'bg-[#f1edff]', text: 'text-[#5b43b0]', solid: 'bg-[#7b61c9]', light: 'bg-[#f1edff]' },
   'Other Revenue': { bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]', light: 'bg-[#fff5dc]' },
 };
 
@@ -79,7 +81,7 @@ export type Lang = 'en' | 'am';
  * so Forest Royalty and Sand Royalty always appear separately.
  * "royalty_unspecified" holds OLD royalty records that were saved before the split.
  */
-export type BucketKey = 'chat' | 'forest' | 'sand' | 'royalty_unspecified' | 'other';
+export type BucketKey = 'chat' | 'forest' | 'sand' | 'royalty_unspecified' | 'trade' | 'other';
 
 export type Bucket = {
   key: BucketKey;
@@ -96,12 +98,14 @@ export const revenueBuckets: Bucket[] = [
   { key: 'forest', en: 'Forest Royalty', am: 'የደን ሮያሊቲ', hex: '#2d7dd2', bg: 'bg-[#eaf2fb]', text: 'text-[#2d7dd2]', solid: 'bg-[#2d7dd2]' },
   { key: 'sand', en: 'Sand Royalty', am: 'የአሸዋ ሮያሊቲ', hex: '#0fa3b1', bg: 'bg-[#e0f5f7]', text: 'text-[#0b7f8a]', solid: 'bg-[#0fa3b1]' },
   { key: 'royalty_unspecified', en: 'Royalty (not specified)', am: 'ሮያሊቲ (ያልተለየ)', hex: '#8aa4bd', bg: 'bg-[#eef2f6]', text: 'text-[#52677d]', solid: 'bg-[#8aa4bd]' },
+  { key: 'trade', en: 'Trade Revenue', am: 'ከንግድ የሚገኝ ገቢ', hex: '#7b61c9', bg: 'bg-[#f1edff]', text: 'text-[#5b43b0]', solid: 'bg-[#7b61c9]' },
   { key: 'other', en: 'Other Revenue', am: 'ሌላ ገቢ', hex: '#e4b44c', bg: 'bg-[#fff5dc]', text: 'text-[#a36b05]', solid: 'bg-[#e4b44c]' },
 ];
 
 export const bucketKeyOf = (item: Pick<Collection, 'category' | 'royaltyType'>): BucketKey => {
   if (item.category === 'Chat') return 'chat';
   if (item.category === 'Royalty') return item.royaltyType ?? 'royalty_unspecified';
+  if (item.category === 'Trade Revenue') return 'trade';
   return 'other';
 };
 
@@ -110,7 +114,11 @@ export const bucketOf = (item: Pick<Collection, 'category' | 'royaltyType'>): Bu
 
 /** Text shown for one record: "Forest Royalty" / "የደን ሮያሊቲ", otherwise the normal category name. */
 export const collectionLabel = (item: Pick<Collection, 'category' | 'royaltyType'>, lang: Lang): string =>
-  item.category === 'Royalty' ? (lang === 'am' ? bucketOf(item).am : bucketOf(item).en) : item.category;
+  item.category === 'Royalty' || item.category === 'Trade Revenue' ? (lang === 'am' ? bucketOf(item).am : bucketOf(item).en) : item.category;
+
+/** Name of a category on the category buttons (the new trade category also has an Amharic name). */
+export const categoryLabel = (category: Category, lang: Lang): string =>
+  category === 'Trade Revenue' ? (lang === 'am' ? 'ከንግድ የሚገኝ ገቢ' : 'Trade Revenue') : category;
 
 /** Totals per bucket. "Royalty (not specified)" is hidden when there is nothing in it. */
 export const bucketTotals = (items: Pick<Collection, 'category' | 'royaltyType' | 'amount'>[]) =>

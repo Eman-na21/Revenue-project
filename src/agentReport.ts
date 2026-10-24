@@ -11,6 +11,7 @@ export type LeaderRow = {
   forest: number;
   sand: number;
   royaltyUnspecified: number;
+  trade: number;
   other: number;
 };
 
@@ -27,6 +28,7 @@ export async function fetchLeaderboard(start: string, end: string): Promise<Lead
     forest: Number(row.forest) || 0,
     sand: Number(row.sand) || 0,
     royaltyUnspecified: Number(row.royalty_unspecified) || 0,
+    trade: Number(row.trade) || 0,
     other: Number(row.other) || 0,
   }));
 }
@@ -70,6 +72,7 @@ export function leaderRowsToReportInput(rows: LeaderRow[], start: string): { age
     add(row.agentId, 'Royalty', 'forest', row.forest);
     add(row.agentId, 'Royalty', 'sand', row.sand);
     add(row.agentId, 'Royalty', null, row.royaltyUnspecified);
+    add(row.agentId, 'Trade Revenue', null, row.trade);
     add(row.agentId, 'Other Revenue', null, row.other);
   }
 
